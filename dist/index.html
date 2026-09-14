@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#08111f" />
+  <meta name="description" content="即時語音辨識與滾動式會議摘要工作台" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2308111f'/%3E%3Cpath d='M18 35V29M27 43V21M36 39V25M45 34V30' stroke='%237c5cff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <title>Murmur 會議助理</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;family=Noto+Sans+TC:wght@400;500;600;700&amp;display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Murmur 首頁">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>Murmur</span>
+      </a>
+      <div class="meeting-identity">
+        <input id="meetingTitle" value="產品週會" aria-label="會議名稱" />
+        <span id="meetingDate"></span>
+      </div>
+      <div class="session-status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">尚未開始</span>
+        <strong id="timer">00:00</strong>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="transcript-panel panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LIVE TRANSCRIPT</p>
+            <h1>即時逐字稿</h1>
+          </div>
+          <div class="language-chip">繁體中文 <span>⌄</span></div>
+        </div>
+
+        <div class="audio-stage" id="audioStage">
+          <div class="waveform" id="waveform" aria-label="音訊波形"></div>
+          <div class="audio-copy">
+            <strong id="audioHeading">準備好就開始</strong>
+            <span id="audioHint">音訊只在你的瀏覽器中處理</span>
+          </div>
+        </div>
+
+        <div class="transcript-stream" id="transcriptStream" aria-live="polite">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-icon">〽</div>
+            <strong>對話會出現在這裡</strong>
+            <p>開始錄音後，Murmur 會將語音即時轉成文字，並在右側整理會議脈絡。</p>
+          </div>
+        </div>
+        <div class="interim" id="interimText"></div>
+
+        <div class="control-dock">
+          <button class="secondary-button" id="demoButton" type="button">載入示範</button>
+          <button class="record-button" id="recordButton" type="button">
+            <span class="mic-icon" aria-hidden="true"></span>
+            <span id="recordLabel">開始錄音</span>
+          </button>
+          <button class="secondary-button" id="clearButton" type="button">清除內容</button>
+        </div>
+        <div class="support-note" id="supportNote"></div>
+      </section>
+
+      <aside class="summary-panel panel">
+        <div class="panel-heading summary-heading">
+          <div>
+            <p class="eyebrow">LIVE BRIEF</p>
+            <h2>會議脈絡</h2>
+          </div>
+          <div class="live-pill"><span></span> 自動整理中</div>
+        </div>
+
+        <div class="summary-scroll" id="summaryScroll">
+          <section class="brief-card overview-card">
+            <div class="card-title"><span class="card-icon violet">✦</span><h3>目前重點</h3></div>
+            <p id="overviewText" class="overview-text">開始對話後，這裡會持續濃縮目前討論的主題與進度。</p>
+            <div class="topic-cloud" id="topicCloud"></div>
+          </section>
+
+          <section class="brief-card">
+            <div class="card-title"><span class="card-icon blue">✓</span><h3>已確認的決策</h3><span class="count" id="decisionCount">0</span></div>
+            <div class="brief-list" id="decisionList"><p class="placeholder">尚未辨識到決策</p></div>
+          </section>
+
+          <section class="brief-card">
+            <div class="card-title"><span class="card-icon amber">↗</span><h3>待辦事項</h3><span class="count" id="actionCount">0</span></div>
+            <div class="brief-list" id="actionList"><p class="placeholder">尚未辨識到待辦</p></div>
+          </section>
+
+          <section class="brief-card">
+            <div class="card-title"><span class="card-icon coral">!</span><h3>待釐清</h3><span class="count" id="questionCount">0</span></div>
+            <div class="brief-list" id="questionList"><p class="placeholder">目前沒有未解問題</p></div>
+          </section>
+        </div>
+
+        <footer class="summary-footer">
+          <span id="lastUpdated">等待會議開始</span>
+          <button id="copyButton" type="button">複製會議摘要</button>
+          <a id="downloadAudio" class="download-link" hidden>下載錄音</a>
+        </footer>
+      </aside>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
