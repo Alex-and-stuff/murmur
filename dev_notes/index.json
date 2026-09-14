@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "20260914T162051Z-build-video-transcript-playback-prototype",
+      "created_at": "2026-09-14T16:20:51Z",
+      "title": "Build video transcript playback prototype",
+      "status": "completed",
+      "tags": [
+        "frontend",
+        "prototype",
+        "transcript",
+        "video"
+      ],
+      "files": [
+        "dist/app.js",
+        "dist/assets/kelly_shorts.mp3",
+        "dist/index.html",
+        "dist/styles.css"
+      ],
+      "branch": "main",
+      "commit": "e457164",
+      "path": "sessions/2026/09/20260914T162051Z-build-video-transcript-playback-prototype.md"
+    },
+    {
+      "id": "20260914T160609Z-benchmark-qwen3-asr-with-mlx-on-apple-silicon",
+      "created_at": "2026-09-14T16:06:09Z",
+      "title": "Benchmark Qwen3-ASR with MLX on Apple Silicon",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "benchmark",
+        "mac",
+        "mlx"
+      ],
+      "files": [
+        "data/chinese/kelly_shorts.mp3",
+        "data/chinese/kelly_shorts.qwen3-asr-1.7b-mlx.txt"
+      ],
+      "branch": "main",
+      "commit": "e457164",
+      "path": "sessions/2026/09/20260914T160609Z-benchmark-qwen3-asr-with-mlx-on-apple-silicon.md"
+    },
+    {
+      "id": "20260914T155525Z-set-up-local-qwen-asr-and-summary-models",
+      "created_at": "2026-09-14T15:55:25Z",
+      "title": "Set up local Qwen ASR and summary models",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "gpu",
+        "models",
+        "setup"
+      ],
+      "files": [
+        ".agents/skills/dev-notes/SKILL.md",
+        ".gitignore",
+        ".python-version",
+        "models/Qwen3-8B-AWQ",
+        "models/Qwen3-ASR-1.7B"
+      ],
+      "branch": "main",
+      "commit": "e457164",
+      "path": "sessions/2026/09/20260914T155525Z-set-up-local-qwen-asr-and-summary-models.md"
+    }
+  ]
+}
