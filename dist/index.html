@@ -102,12 +102,17 @@
 
         <footer class="summary-footer">
           <span id="lastUpdated">等待會議開始</span>
-          <button id="copyButton" type="button">複製會議摘要</button>
+          <div class="export-actions" aria-label="會議記錄輸出選項">
+            <button id="markdownButton" type="button" title="下載 Markdown 檔案"><span>↓</span> Markdown</button>
+            <button id="pdfButton" type="button" title="開啟列印視窗並儲存為 PDF"><span>▤</span> PDF</button>
+            <button id="emailButton" class="email-button" type="button" title="複製適合貼到 Email 的文字"><span>✉</span> Email 文字</button>
+          </div>
           <a id="downloadAudio" class="download-link" hidden>下載錄音</a>
         </footer>
       </aside>
     </main>
   </div>
+  <article class="print-report" id="printReport" aria-hidden="true"></article>
   <div class="toast" id="toast" role="status"></div>
   <script src="app.js"></script>
 </body>

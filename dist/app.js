@@ -1,6 +1,6 @@
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const els = Object.fromEntries([
-  "meetingDate","statusDot","statusText","timer","audioHeading","audioHint","waveform","transcriptStream","emptyState","interimText","recordButton","recordLabel","demoButton","clearButton","supportNote","summaryScroll","overviewText","topicCloud","decisionList","actionList","questionList","decisionCount","actionCount","questionCount","lastUpdated","copyButton","downloadAudio","toast"
+  "meetingDate","statusDot","statusText","timer","audioHeading","audioHint","waveform","transcriptStream","emptyState","interimText","recordButton","recordLabel","demoButton","clearButton","supportNote","summaryScroll","overviewText","topicCloud","decisionList","actionList","questionList","decisionCount","actionCount","questionCount","lastUpdated","markdownButton","pdfButton","emailButton","downloadAudio","printReport","toast"
 ].map(id => [id, document.getElementById(id)]));
 
 const state = { recording: false, startedAt: null, timerId: null, recognition: null, stream: null, recorder: null, chunks: [], lines: [], decisions: [], actions: [], questions: [], demoTimers: [] };
@@ -197,12 +197,69 @@ function createAudioDownload() {
   els.downloadAudio.hidden = false;
 }
 
-async function copySummary() {
-  const title = document.getElementById("meetingTitle").value;
-  const section = (label, items) => `${label}\n${items.length ? items.map(item => `• ${item.text}`).join("\n") : "• 無"}`;
-  const text = `${title}\n\n${els.overviewText.textContent}\n\n${section("已確認的決策", state.decisions)}\n\n${section("待辦事項", state.actions)}\n\n${section("待釐清", state.questions)}`;
-  try { await navigator.clipboard.writeText(text); showToast("會議摘要已複製"); }
-  catch (_) { showToast("無法存取剪貼簿"); }
+function getMeetingInfo() {
+  return {
+    title: document.getElementById("meetingTitle").value.trim() || "會議記錄",
+    date: new Intl.DateTimeFormat("zh-TW", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(new Date()),
+    duration: els.timer.textContent,
+    overview: state.lines.length ? els.overviewText.textContent : "本次會議尚無內容。"
+  };
+}
+
+function markdownList(items) {
+  return items.length ? items.map(item => `- ${item.text}`).join("\n") : "- 無";
+}
+
+function buildMarkdown() {
+  const info = getMeetingInfo();
+  const transcript = state.lines.length ? state.lines.map(line => `**${line.time}｜發言者**  \n${line.text}`).join("\n\n") : "尚無逐字稿。";
+  return `# ${info.title}\n\n> ${info.date} · 會議長度 ${info.duration}\n\n## 會議摘要\n\n${info.overview}\n\n## 已確認的決策\n\n${markdownList(state.decisions)}\n\n## 待辦事項\n\n${markdownList(state.actions)}\n\n## 待釐清\n\n${markdownList(state.questions)}\n\n## 完整逐字稿\n\n${transcript}\n\n---\n由 Murmur 會議助理整理\n`;
+}
+
+function downloadMarkdown() {
+  const info = getMeetingInfo();
+  const blob = new Blob(["\ufeff", buildMarkdown()], { type: "text/markdown;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${safeFilename(info.title)}-${new Date().toISOString().slice(0, 10)}.md`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  showToast("Markdown 會議記錄已下載");
+}
+
+function buildEmailText() {
+  const info = getMeetingInfo();
+  const list = (items, empty = "無") => items.length ? items.map(item => `・${item.text}`).join("\n") : `・${empty}`;
+  return `主旨：${info.title}｜會議紀要｜${new Date().toLocaleDateString("zh-TW")}\n\n大家好，\n\n以下是本次「${info.title}」的會議紀要：\n\n【會議摘要】\n${info.overview}\n\n【已確認的決策】\n${list(state.decisions)}\n\n【後續待辦】\n${list(state.actions)}\n\n【待釐清事項】\n${list(state.questions)}\n\n如有遺漏或需要修正，請直接回覆補充，謝謝。`;
+}
+
+async function copyEmailText() {
+  const copied = await copyText(buildEmailText());
+  showToast(copied ? "Email 文字已複製，可以直接貼上" : "無法存取剪貼簿");
+}
+
+function printPdf() {
+  const info = getMeetingInfo();
+  const listHtml = items => items.length ? `<ul>${items.map(item => `<li>${escapeHTML(item.text)}</li>`).join("")}</ul>` : "<p>無</p>";
+  const transcriptHtml = state.lines.length ? state.lines.map(line => `<div class="transcript-line"><time>${escapeHTML(line.time)}</time><span>${escapeHTML(line.text)}</span></div>`).join("") : "<p>尚無逐字稿。</p>";
+  els.printReport.innerHTML = `<h1>${escapeHTML(info.title)}</h1><div class="report-meta">${escapeHTML(info.date)} · 會議長度 ${escapeHTML(info.duration)}</div><h2>會議摘要</h2><p>${escapeHTML(info.overview)}</p><h2>已確認的決策</h2>${listHtml(state.decisions)}<h2>待辦事項</h2>${listHtml(state.actions)}<h2>待釐清</h2>${listHtml(state.questions)}<h2>完整逐字稿</h2>${transcriptHtml}<footer>由 Murmur 會議助理整理</footer>`;
+  els.printReport.setAttribute("aria-hidden", "false");
+  window.print();
+  setTimeout(() => els.printReport.setAttribute("aria-hidden", "true"), 500);
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (_) {
+    const area = document.createElement("textarea");
+    area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
+    document.body.appendChild(area); area.select();
+    const copied = document.execCommand("copy"); area.remove(); return copied;
+  }
+}
+
+function safeFilename(name) {
+  return name.replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, "-").slice(0, 60) || "meeting-notes";
 }
 
 function showToast(message) {
@@ -213,7 +270,9 @@ function showToast(message) {
 els.recordButton.addEventListener("click", () => state.recording ? stopRecording() : startRecording());
 els.demoButton.addEventListener("click", runDemo);
 els.clearButton.addEventListener("click", clearAll);
-els.copyButton.addEventListener("click", copySummary);
+els.markdownButton.addEventListener("click", downloadMarkdown);
+els.pdfButton.addEventListener("click", printPdf);
+els.emailButton.addEventListener("click", copyEmailText);
 els.meetingDate.textContent = new Intl.DateTimeFormat("zh-TW", { month: "long", day: "numeric", weekday: "short" }).format(new Date());
 if (!SpeechRecognition) els.supportNote.textContent = "建議使用 Chrome 以取得即時語音辨識。";
 setupWaveform();
