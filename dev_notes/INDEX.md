@@ -8,6 +8,8 @@ Generated index. Session files are the source of truth.
 
 ## Completed
 
+- [Prevent incremental summary changelog drift](sessions/2026/09/20260915T125145Z-prevent-incremental-summary-changelog-drift.md) — 2026-09-15T12:51:45Z — prompt, quality, realtime, summary
+- [Implement real-time rolling meeting summaries](sessions/2026/09/20260915T123707Z-implement-real-time-rolling-meeting-summaries.md) — 2026-09-15T12:37:07Z — api, frontend, mlx, realtime, summary
 - [Complete Apple MLX summary POC startup verification](sessions/2026/09/20260915T122756Z-complete-apple-mlx-summary-poc-startup-verification.md) — 2026-09-15T12:27:56Z — asr, mlx, poc, startup, summary
 - [Implement Apple MLX summary POC](sessions/2026/09/20260915T121457Z-implement-apple-mlx-summary-poc.md) — 2026-09-15T12:14:57Z — asr, frontend, mlx, qwen, summary
 - [Establish VAD v1 baseline](sessions/2026/09/20260915T115001Z-establish-vad-v1-baseline.md) — 2026-09-15T11:50:01Z — asr, frontend, realtime, vad

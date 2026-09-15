@@ -4,9 +4,14 @@ Murmur captures the audio from the video or audio file that is currently playing
 voice-activity-gated 16 kHz PCM chunks (roughly 1-16 seconds, cut at natural pauses) to a
 local inference service, and appends each Qwen3-ASR result to the transcript panel. The
 source media itself is never uploaded as a file. Local MP3, other browser-supported audio,
-and browser-supported video files share the same flow. Once transcript segments exist, a
-manual action sends their text and timestamps to a local Qwen3 language model and renders
-a structured summary, key points, decisions, and action items.
+and browser-supported video files share the same flow. Once two stable transcript segments
+exist, the page automatically creates a structured summary, key points, decisions, and
+action items. Each later segment is merged into the existing notes after a short debounce,
+so the summary rolls forward without repeatedly sending the full meeting transcript. A
+manual full refresh remains available. The prompt rewrites the result as standalone notes,
+deduplicates related points, and forbids update-log phrases such as “new transcript.” The
+browser also performs a full rebase after every six additional segments while the complete
+transcript remains within the model's safe context budget.
 
 ## Run locally on Apple Silicon
 
@@ -33,8 +38,9 @@ MURMUR_SUMMARY_MODEL=Qwen/Qwen3-8B-MLX-4bit \
 
 The chunk endpoint accepts mono little-endian Float32 PCM at 16 kHz. `GET
 /api/health` reports both model states, `POST /api/transcribe` runs one audio chunk,
-and `POST /api/summarize` accepts the accumulated transcript segments. The first normal
-startup downloads the configured MLX summary weights into the Hugging Face cache.
+and `POST /api/summarize` accepts transcript segments plus an optional `previous_summary`
+for incremental updates. The first normal startup downloads the configured MLX summary
+weights into the Hugging Face cache.
 
 ## Test against a YouTube video
 

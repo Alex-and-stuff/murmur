@@ -4,6 +4,10 @@ const MAX_CHUNK_SECONDS = 16;
 const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
+const ROLLING_SUMMARY_DEBOUNCE_MS = 1600;
+const INITIAL_SUMMARY_SEGMENTS = 2;
+const FULL_SUMMARY_REBASE_SEGMENTS = 6;
+const FULL_SUMMARY_REBASE_MAX_CHARS = 20000;
 
 const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
@@ -14,6 +18,11 @@ let serverStatus = "loading";
 let summaryStatus = "loading";
 let summaryResult = null;
 let summaryPending = false;
+let summaryTimer = null;
+let summaryRequestNewSegments = 0;
+let coveredSegmentIds = new Set();
+let nextSegmentId = 1;
+let lastFullSummarySegmentCount = 0;
 let sessionGeneration = 0;
 let pendingRequests = 0;
 let healthTimer = null;
@@ -167,10 +176,11 @@ async function transcribeChunk(pcm, start, end, generation) {
     if (generation !== sessionGeneration) return;
     const text = String(payload.text || "").trim();
     if (text) {
-      if (summaryResult) { summaryResult = null; renderSummary(); }
-      segments.push({ start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
+      segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
       segments.sort((a, b) => a.start - b.start);
       renderCompleted();
+      scheduleRollingSummary();
+      renderSummary();
     }
   } catch (error) {
     showToast(`逐字稿暫時無法產生：${error.message}`);
@@ -208,7 +218,7 @@ function syncUI() {
   el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
   el.demoVisual.classList.toggle("playing", activeMedia === el.demoAudio && !activeMedia.paused);
   el.summaryButton.disabled = summaryPending || summaryStatus !== "ready" || !segments.length;
-  el.summaryButton.textContent = summaryPending ? "整理中…" : summaryResult ? "重新產生" : "產生摘要";
+  el.summaryButton.textContent = summaryPending ? "更新中…" : summaryResult ? "立即重整" : "立即產生";
   el.copySummaryButton.disabled = !summaryResult;
 }
 
@@ -271,6 +281,11 @@ function resetTranscript() {
   sessionGeneration++;
   segments = [];
   summaryResult = null;
+  coveredSegmentIds = new Set();
+  nextSegmentId = 1;
+  lastFullSummarySegmentCount = 0;
+  clearTimeout(summaryTimer);
+  summaryTimer = null;
   capturer.discard();
   renderCompleted();
   renderSummary();
@@ -359,8 +374,11 @@ async function copyTranscript() {
 
 function renderSummary() {
   if (!summaryResult) {
-    el.summaryContent.innerHTML = `<div class="summary-empty"><strong>摘要會出現在這裡</strong><p>目前採手動產生，方便先確認逐字稿完整度與摘要品質。</p></div>`;
-    el.summaryMeta.textContent = "先產生逐字稿，再由本機 Qwen3 整理重點。";
+    const waiting = segments.length && segments.length < INITIAL_SUMMARY_SEGMENTS;
+    const title = summaryPending ? "正在建立第一版摘要…" : waiting ? "再多一段就開始整理" : "摘要會隨逐字稿出現在這裡";
+    const detail = summaryPending ? `正在整合前 ${summaryRequestNewSegments} 段穩定逐字稿。` : waiting ? "累積足夠上下文後會自動開始。" : "每當新段落完成，系統會在背景滾動更新會議重點。";
+    el.summaryContent.innerHTML = `<div class="summary-empty"><strong>${title}</strong><p>${detail}</p></div>`;
+    el.summaryMeta.textContent = summaryPending ? "Real-time 滾動摘要更新中" : "自動追蹤穩定的逐字稿段落。";
     syncUI();
     return;
   }
@@ -370,31 +388,82 @@ function renderSummary() {
     return meta ? `${item.task}（${meta}）` : item.task;
   });
   el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>摘要</h3><p>${escapeHTML(summaryResult.summary)}</p></div>${list("重點", summaryResult.key_points)}</div><div>${list("決策", summaryResult.decisions)}${list("待辦事項", actions)}</div></div>`;
-  el.summaryMeta.textContent = `根據 ${segments.length} 段逐字稿整理 · ${Number(summaryResult.inference_seconds || 0).toFixed(1)} 秒`;
+  const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id)).length;
+  el.summaryMeta.textContent = summaryPending
+    ? `正在整合 ${summaryRequestNewSegments} 段新逐字稿…`
+    : uncovered
+      ? `已涵蓋 ${coveredSegmentIds.size} 段 · ${uncovered} 段等待更新`
+      : `已同步 ${coveredSegmentIds.size} 段逐字稿 · 上次生成 ${Number(summaryResult.inference_seconds || 0).toFixed(1)} 秒`;
   syncUI();
 }
 
-async function generateSummary() {
+function summaryForRequest() {
+  if (!summaryResult) return null;
+  return {
+    summary: summaryResult.summary,
+    key_points: summaryResult.key_points,
+    decisions: summaryResult.decisions,
+    action_items: summaryResult.action_items,
+  };
+}
+
+function scheduleRollingSummary({ immediate = false } = {}) {
+  clearTimeout(summaryTimer);
+  summaryTimer = null;
+  if (summaryStatus !== "ready" || summaryPending || !segments.length) return;
+  const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id));
+  const required = summaryResult ? 1 : INITIAL_SUMMARY_SEGMENTS;
+  if (uncovered.length < required) return;
+  summaryTimer = setTimeout(() => generateSummary(false), immediate ? 0 : ROLLING_SUMMARY_DEBOUNCE_MS);
+}
+
+async function generateSummary(forceFull = false) {
   if (!segments.length || summaryPending) return;
+  clearTimeout(summaryTimer);
+  summaryTimer = null;
   const generation = sessionGeneration;
+  const snapshot = segments.slice();
+  const transcriptChars = snapshot.reduce((total, segment) => total + segment.text.length + 32, 0);
+  const rebaseDue = summaryResult
+    && snapshot.length - lastFullSummarySegmentCount >= FULL_SUMMARY_REBASE_SEGMENTS
+    && transcriptChars <= FULL_SUMMARY_REBASE_MAX_CHARS;
+  const incremental = !forceFull && !rebaseDue && summaryResult && coveredSegmentIds.size;
+  const requestSegments = incremental
+    ? snapshot.filter(segment => !coveredSegmentIds.has(segment.id))
+    : snapshot;
+  if (!requestSegments.length) return;
   summaryPending = true;
+  summaryRequestNewSegments = requestSegments.length;
+  let completed = false;
+  renderSummary();
   syncUI();
   try {
     const response = await fetch("/api/summarize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ segments: segments.map(({ start, end, text }) => ({ start, end, text })) }),
+      body: JSON.stringify({
+        segments: requestSegments.map(({ start, end, text }) => ({ start, end, text })),
+        ...(incremental ? { previous_summary: summaryForRequest() } : {}),
+      }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || payload.error || "摘要失敗");
     if (generation !== sessionGeneration) return;
     summaryResult = payload;
+    coveredSegmentIds = forceFull || !incremental
+      ? new Set(snapshot.map(segment => segment.id))
+      : new Set([...coveredSegmentIds, ...requestSegments.map(segment => segment.id)]);
+    if (!incremental) lastFullSummarySegmentCount = snapshot.length;
+    completed = true;
     renderSummary();
   } catch (error) {
     showToast(`摘要暫時無法產生：${error.message}`);
     checkHealth();
   } finally {
     summaryPending = false;
+    summaryRequestNewSegments = 0;
+    if (completed && generation === sessionGeneration) scheduleRollingSummary({ immediate: true });
+    renderSummary();
     syncUI();
   }
 }
@@ -411,6 +480,7 @@ async function copySummary() {
 }
 
 async function checkHealth() {
+  const previousSummaryStatus = summaryStatus;
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
@@ -426,6 +496,7 @@ async function checkHealth() {
     el.summaryRuntime.textContent = "未連接本機 inference service";
   }
   updatePlaybackState();
+  if (previousSummaryStatus !== "ready" && summaryStatus === "ready") scheduleRollingSummary();
   clearTimeout(healthTimer);
   if (serverStatus !== "ready" || summaryStatus === "loading") healthTimer = setTimeout(checkHealth, 2000);
   return serverStatus;
@@ -446,7 +517,7 @@ el.fileInput.addEventListener("change", event => {
   event.target.value = "";
 });
 el.copyButton.addEventListener("click", copyTranscript);
-el.summaryButton.addEventListener("click", generateSummary);
+el.summaryButton.addEventListener("click", () => generateSummary(true));
 el.copySummaryButton.addEventListener("click", copySummary);
 el.youtubeForm.addEventListener("submit", event => {
   event.preventDefault();

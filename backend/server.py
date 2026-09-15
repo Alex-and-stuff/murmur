@@ -136,7 +136,11 @@ class FixtureBackend:
 class SummaryBackend(Protocol):
     name: str
 
-    def summarize(self, transcript: str) -> dict[str, object]: ...
+    def summarize(
+        self,
+        transcript: str,
+        previous_summary: dict[str, object] | None = None,
+    ) -> dict[str, object]: ...
 
 
 def normalize_summary(payload: object) -> dict[str, object]:
@@ -183,19 +187,37 @@ class MLXSummaryBackend:
         self._generate = generate
         self._lock = threading.Lock()
 
-    def summarize(self, transcript: str) -> dict[str, object]:
+    def summarize(
+        self,
+        transcript: str,
+        previous_summary: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if previous_summary:
+            task = (
+                "把尚未納入的會議發言整合進目前的紀要草稿，然後重寫整份紀要。"
+                "保留仍有效的事實；若發言補充或修正先前資訊，以較新的明確說法為準。"
+                "目前紀要只是可修改的草稿，不要沿用其中重複、瑣碎或描述整理過程的句子。"
+                f"\n\n目前紀要草稿 JSON：\n{json.dumps(previous_summary, ensure_ascii=False)}"
+                f"\n\n尚未納入的會議發言：\n{transcript}"
+            )
+        else:
+            task = f"請整理以下逐字稿：\n\n{transcript}"
         messages = [
             {
                 "role": "system",
                 "content": (
                     "你是會議紀錄助手。只根據逐字稿整理內容，不得補充未出現的事實。"
+                    "每次都要輸出一份可獨立閱讀的最新完整會議紀要，而不是更新日誌。"
+                    "不得在結果中提及「逐字稿」「新加入」「既有摘要」「上一批」「本次更新」"
+                    "或任何資料處理與生成過程。摘要使用二至四句；重點最多八項，決策最多六項，"
+                    "待辦事項最多八項。合併語意相同或高度相關的內容，刪除重複、過時與瑣碎項目。"
                     "請輸出繁體中文 JSON，不要使用 Markdown。格式必須是："
                     '{"summary":"...","key_points":["..."],"decisions":["..."],'
                     '"action_items":[{"task":"...","owner":null,"due":null}]}。'
                     "若逐字稿未提到決策、負責人或期限，使用空陣列或 null。"
                 ),
             },
-            {"role": "user", "content": f"請整理以下逐字稿：\n\n{transcript}"},
+            {"role": "user", "content": task},
         ]
         prompt = self.tokenizer.apply_chat_template(
             messages,
@@ -222,7 +244,11 @@ class MLXSummaryBackend:
 class FixtureSummaryBackend:
     name = "fixture-summary"
 
-    def summarize(self, transcript: str) -> dict[str, object]:
+    def summarize(
+        self,
+        transcript: str,
+        previous_summary: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         return {
             "summary": "這是一份測試逐字稿摘要。",
             "key_points": ["摘要 API 已收到逐字稿"],
@@ -437,14 +463,17 @@ class MurmurHandler(SimpleHTTPRequestHandler):
                     {"error": "transcript_too_long", "max_chars": MAX_SUMMARY_TRANSCRIPT_CHARS},
                 )
                 return
+            raw_previous = payload.get("previous_summary")
+            previous_summary = normalize_summary(raw_previous) if raw_previous is not None else None
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_transcript", "detail": str(exc)})
             return
 
         try:
             began = time.monotonic()
-            result = self.summary_state.backend.summarize(transcript)
+            result = self.summary_state.backend.summarize(transcript, previous_summary)
             result["inference_seconds"] = round(time.monotonic() - began, 3)
+            result["mode"] = "incremental" if previous_summary else "full"
             self._json(HTTPStatus.OK, result)
         except Exception as exc:
             self._json(

@@ -78,11 +78,11 @@
 
     <section class="summary-panel">
       <div class="summary-heading">
-        <div><p class="eyebrow">MEETING NOTES</p><h2>AI 摘要</h2><p id="summaryMeta">先產生逐字稿，再由本機 Qwen3 整理重點。</p></div>
-        <button id="summaryButton" type="button" disabled>產生摘要</button>
+        <div><p class="eyebrow">MEETING NOTES · LIVE</p><h2>AI 滾動摘要</h2><p id="summaryMeta">自動追蹤穩定的逐字稿段落。</p></div>
+        <button id="summaryButton" type="button" disabled>立即產生</button>
       </div>
       <div class="summary-content" id="summaryContent" aria-live="polite">
-        <div class="summary-empty"><strong>摘要會出現在這裡</strong><p>目前採手動產生，方便先確認逐字稿完整度與摘要品質。</p></div>
+        <div class="summary-empty"><strong>摘要會隨逐字稿出現在這裡</strong><p>每當新段落完成，系統會在背景滾動更新會議重點。</p></div>
       </div>
       <footer class="summary-footer"><span id="summaryRuntime">摘要模型載入中</span><button id="copySummaryButton" type="button" disabled>複製摘要</button></footer>
     </section>

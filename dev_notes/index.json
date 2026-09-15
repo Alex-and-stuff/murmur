@@ -2,6 +2,50 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T125145Z-prevent-incremental-summary-changelog-drift",
+      "created_at": "2026-09-15T12:51:45Z",
+      "title": "Prevent incremental summary changelog drift",
+      "status": "completed",
+      "tags": [
+        "prompt",
+        "quality",
+        "realtime",
+        "summary"
+      ],
+      "files": [
+        "README.md",
+        "backend/server.py",
+        "dist/app.js",
+        "tests/test_server.py"
+      ],
+      "branch": "main",
+      "commit": "f3c7cff",
+      "path": "sessions/2026/09/20260915T125145Z-prevent-incremental-summary-changelog-drift.md"
+    },
+    {
+      "id": "20260915T123707Z-implement-real-time-rolling-meeting-summaries",
+      "created_at": "2026-09-15T12:37:07Z",
+      "title": "Implement real-time rolling meeting summaries",
+      "status": "completed",
+      "tags": [
+        "api",
+        "frontend",
+        "mlx",
+        "realtime",
+        "summary"
+      ],
+      "files": [
+        "README.md",
+        "backend/server.py",
+        "dist/app.js",
+        "dist/index.html",
+        "tests/test_server.py"
+      ],
+      "branch": "main",
+      "commit": "f3c7cff",
+      "path": "sessions/2026/09/20260915T123707Z-implement-real-time-rolling-meeting-summaries.md"
+    },
+    {
       "id": "20260915T122756Z-complete-apple-mlx-summary-poc-startup-verification",
       "created_at": "2026-09-15T12:27:56Z",
       "title": "Complete Apple MLX summary POC startup verification",
