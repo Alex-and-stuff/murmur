@@ -25,12 +25,12 @@ def main() -> None:
     parser.add_argument("--port", default=8787, type=int)
     parser.add_argument(
         "--backend",
-        choices=("mlx", "fixture"),
+        choices=("mlx", "transformers", "fixture"),
         default=os.environ.get("MURMUR_ASR_BACKEND", "mlx"),
     )
     parser.add_argument(
         "--summary-backend",
-        choices=("mlx", "fixture"),
+        choices=("mlx", "fixture", "off"),
         default=os.environ.get("MURMUR_SUMMARY_BACKEND", "mlx"),
     )
     parser.add_argument(

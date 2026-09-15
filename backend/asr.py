@@ -41,6 +41,36 @@ class MLXQwenBackend:
         return result.text.strip(), str(detected or language)
 
 
+class TransformersQwenBackend:
+    """Qwen3-ASR through the official Transformers/CUDA runtime."""
+
+    def __init__(self, model_name: str):
+        import torch
+        from qwen_asr import Qwen3ASRModel
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for the transformers ASR backend")
+        self.name = f"{model_name} · Transformers CUDA"
+        self.model = Qwen3ASRModel.from_pretrained(
+            model_name,
+            dtype=torch.float16,
+            device_map="cuda:0",
+            max_inference_batch_size=1,
+            max_new_tokens=256,
+        )
+        self._lock = threading.Lock()
+
+    def transcribe(self, samples: np.ndarray, language: str) -> tuple[str, str]:
+        with self._lock:
+            result = self.model.transcribe(
+                audio=(samples, SAMPLE_RATE),
+                language=language or None,
+            )[0]
+        detected = getattr(result, "language", None) or language
+        text = str(getattr(result, "text", result)).strip()
+        return text, str(detected)
+
+
 class FixtureBackend:
     """Small deterministic backend used only by the automated smoke tests."""
 
@@ -64,6 +94,8 @@ class BackendState:
             backend: ASRBackend
             if backend_name == "fixture":
                 backend = FixtureBackend()
+            elif backend_name == "transformers":
+                backend = TransformersQwenBackend(model_name)
             else:
                 backend = MLXQwenBackend(model_name)
             with self._lock:

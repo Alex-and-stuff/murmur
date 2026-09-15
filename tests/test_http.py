@@ -57,6 +57,13 @@ class ServerSmokeTest(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn(b"Murmur", response.read())
 
+    def test_summary_can_be_disabled(self):
+        from backend.llm import LLMState
+
+        summary_state = LLMState()
+        summary_state.load("off", "unused")
+        self.assertEqual(summary_state.snapshot()["status"], "disabled")
+
     def test_float32_chunk_is_transcribed(self):
         pcm = array("f", [0.0]) * SAMPLE_RATE
         request = urllib.request.Request(

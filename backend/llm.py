@@ -88,6 +88,13 @@ class LLMState:
         self._lock = threading.Lock()
 
     def load(self, backend_name: str, model_name: str) -> None:
+        if backend_name == "off":
+            with self._lock:
+                self.llm = None
+                self.status = "disabled"
+                self.error = None
+                self.loaded_at = None
+            return
         try:
             llm: ChatLLM = ScriptedChatLLM() if backend_name == "fixture" else MLXChatLLM(model_name)
             with self._lock:

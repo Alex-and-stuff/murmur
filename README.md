@@ -123,3 +123,29 @@ The deployed static prototype remains useful as a UI preview, but realtime infer
 must currently be run through the local server because the POC models require Apple
 Metal. This stage intentionally targets MLX; an RTX backend abstraction is deferred until
 the summary workflow and output quality are validated.
+
+## Run ASR only on Windows with NVIDIA CUDA
+
+The Windows backend uses the official `qwen-asr` Transformers runtime. It deliberately
+disables meeting summaries, so no Apple-only MLX model is loaded. An NVIDIA GPU with CUDA
+support is required.
+
+Create a clean virtual environment, then install CUDA-enabled PyTorch before the ASR
+package. This example uses CUDA 12.6 wheels:
+
+```powershell
+python -m venv .venv-qwen-asr
+.\.venv-qwen-asr\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-qwen-asr\Scripts\python.exe -m pip install torch==2.7.1+cu126 --index-url https://download.pytorch.org/whl/cu126
+.\.venv-qwen-asr\Scripts\python.exe -m pip install qwen-asr numpy
+```
+
+Start with the smaller Qwen model, which downloads automatically on its first run:
+
+```powershell
+.\.venv-qwen-asr\Scripts\python.exe backend\server.py --backend transformers --model Qwen/Qwen3-ASR-0.6B --summary-backend off
+```
+
+Then open <http://127.0.0.1:8787>. The service health endpoint should show
+`Qwen/Qwen3-ASR-0.6B · Transformers CUDA`. On the tested RTX 3060 Ti (8 GB), this model
+used about 3.2 GB VRAM and transcribed five seconds of Chinese audio in 2.31 seconds.
