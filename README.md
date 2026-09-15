@@ -16,6 +16,19 @@ online summary updates without disabling manual refreshes, and its inference deb
 lists every ASR audio context and summary prompt context for the current media session.
 Audio-only sources use the compact player without the old sample-video visual.
 
+## Backend layout
+
+The backend is split by concern instead of living in one file:
+
+| Module | Responsibility |
+| --- | --- |
+| `backend/config.py` | Paths, sample rate, request-size limits, default model names |
+| `backend/asr.py` | `ASRBackend` protocol, MLX and fixture ASR backends, load state |
+| `backend/summary.py` | Summary backends, prompt, response normalisation, load state |
+| `backend/media.py` | YouTube allow-list and `yt-dlp` audio fetcher |
+| `backend/http_app.py` | HTTP handler, routes, `create_server` |
+| `backend/server.py` | CLI entry point only |
+
 ## Run locally on Apple Silicon
 
 Use the existing MLX environment. The page reports ASR and summary model readiness
@@ -68,7 +81,7 @@ redistributing downloaded audio.
 ## Smoke test without loading the model
 
 ```bash
-python -m unittest tests.test_server
+python -m unittest discover -s tests -t .
 ```
 
 The deployed static prototype remains useful as a UI preview, but realtime inference

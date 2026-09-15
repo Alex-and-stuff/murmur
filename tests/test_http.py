@@ -5,45 +5,11 @@ import urllib.error
 import urllib.request
 from array import array
 
-from backend.server import BackendState, MLXSummaryBackend, MediaFetchError, SAMPLE_RATE, create_server
+from backend.asr import BackendState
+from backend.config import SAMPLE_RATE
+from backend.http_app import create_server
+from backend.media import MediaFetchError
 
-
-class SummaryPromptTest(unittest.TestCase):
-    def test_incremental_prompt_requires_standalone_deduplicated_notes(self):
-        class FakeTokenizer:
-            def apply_chat_template(self, messages, **kwargs):
-                self.messages = messages
-                return "prompt"
-
-            def encode(self, prompt):
-                return [1, 2, 3]
-
-        backend = MLXSummaryBackend.__new__(MLXSummaryBackend)
-        backend.model = object()
-        backend.tokenizer = FakeTokenizer()
-        backend._lock = threading.Lock()
-        backend._generate = lambda *args, **kwargs: json.dumps(
-            {
-                "summary": "整合後的摘要",
-                "key_points": ["合併後的重點"],
-                "decisions": [],
-                "action_items": [],
-            },
-            ensure_ascii=False,
-        )
-
-        result = backend.summarize(
-            "[1.0s–2.0s] 後續討論",
-            {"summary": "先前摘要", "key_points": [], "decisions": [], "action_items": []},
-        )
-
-        system_prompt = backend.tokenizer.messages[0]["content"]
-        task_prompt = backend.tokenizer.messages[1]["content"]
-        self.assertIn("可獨立閱讀", system_prompt)
-        self.assertIn("合併語意相同", system_prompt)
-        self.assertIn("不得在結果中提及", system_prompt)
-        self.assertIn("重寫整份紀要", task_prompt)
-        self.assertEqual(result["context_tokens"], 3)
 
 
 class ServerSmokeTest(unittest.TestCase):
@@ -246,6 +212,8 @@ class FetchMediaTest(unittest.TestCase):
         status, payload = self._post_json(base_url, "/api/fetch-media", {"url": "https://youtu.be/abc123"})
         self.assertEqual(status, 502)
         self.assertEqual(payload["error"], "fetch_failed")
+
+
 
 
 if __name__ == "__main__":
