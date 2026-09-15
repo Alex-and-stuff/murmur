@@ -4,10 +4,13 @@ Generated index. Session files are the source of truth.
 
 ## Active
 
+- [Replace the rolling summary with bounded meeting state](sessions/2026/09/20260915T153833Z-replace-the-rolling-summary-with-bounded-meeting-state.md) — 2026-09-15T15:38:33Z — api, context-budget, llm, meeting-state, sqlite, tests
 - [Serialize MLX ASR and summary startup](sessions/2026/09/20260915T122404Z-serialize-mlx-asr-and-summary-startup.md) — 2026-09-15T12:24:04Z — asr, bugfix, mlx, startup, summary
 
 ## Completed
 
+- [Merge bounded meeting state branch into main](sessions/2026/09/20260915T154307Z-merge-bounded-meeting-state-branch-into-main.md) — 2026-09-15T15:43:07Z — branch, meeting-state, merge, refactor
+- [Split the backend server into focused modules](sessions/2026/09/20260915T153330Z-split-the-backend-server-into-focused-modules.md) — 2026-09-15T15:33:30Z — architecture, backend, refactor, tests
 - [Add online summary control and inference context diagnostics](sessions/2026/09/20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics.md) — 2026-09-15T14:35:28Z — api, debug, frontend, summary
 - [Prevent incremental summary changelog drift](sessions/2026/09/20260915T125145Z-prevent-incremental-summary-changelog-drift.md) — 2026-09-15T12:51:45Z — prompt, quality, realtime, summary
 - [Implement real-time rolling meeting summaries](sessions/2026/09/20260915T123707Z-implement-real-time-rolling-meeting-summaries.md) — 2026-09-15T12:37:07Z — api, frontend, mlx, realtime, summary

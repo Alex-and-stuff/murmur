@@ -72,20 +72,21 @@
 
     <section class="summary-panel">
       <div class="summary-heading">
-        <div><p class="eyebrow">MEETING NOTES · LIVE</p><h2>AI 滾動摘要</h2><p id="summaryMeta">自動追蹤穩定的逐字稿段落。</p></div>
+        <div><p class="eyebrow">MEETING STATE · LIVE</p><h2>會議狀態</h2><p id="summaryMeta">固定大小的線上狀態：主題索引 + 目前主題。</p></div>
         <div class="summary-actions">
-          <button class="summary-toggle" id="onlineSummaryToggle" type="button" role="switch" aria-checked="true"><span></span>Online summary</button>
-          <button id="summaryButton" type="button" disabled>立即產生</button>
+          <button class="summary-toggle" id="onlineSummaryToggle" type="button" role="switch" aria-checked="true"><span></span>自動整理</button>
+          <button id="summaryButton" type="button" disabled>立即整理</button>
+          <button id="finalizeButton" type="button" disabled>結束並彙整</button>
         </div>
       </div>
       <div class="summary-content" id="summaryContent" aria-live="polite">
-        <div class="summary-empty"><strong>摘要會隨逐字稿出現在這裡</strong><p>每當新段落完成，系統會在背景滾動更新會議重點。</p></div>
+        <div class="summary-empty"><strong>會議狀態會出現在這裡</strong><p>每次整理只會送出「主題索引 + 目前主題 + 新逐字稿」，長度固定。</p></div>
       </div>
       <footer class="summary-footer"><span id="summaryRuntime">摘要模型載入中</span><button id="copySummaryButton" type="button" disabled>複製摘要</button></footer>
     </section>
 
     <section class="context-panel">
-      <div class="context-heading"><div><p class="eyebrow">INFERENCE DEBUG</p><h2>Context 長度</h2></div><span id="contextCount">0 次推論</span></div>
+      <div class="context-heading"><div><p class="eyebrow">INFERENCE DEBUG</p><h2>Context 長度與預算</h2></div><span id="contextCount">0 次推論</span></div>
       <div class="context-list" id="contextList" aria-live="polite"><p>推論開始後會在這裡顯示每次的 context 長度。</p></div>
     </section>
 
