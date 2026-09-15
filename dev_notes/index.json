@@ -2,6 +2,28 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T154307Z-merge-bounded-meeting-state-branch-into-main",
+      "created_at": "2026-09-15T15:43:07Z",
+      "title": "Merge bounded meeting state branch into main",
+      "status": "completed",
+      "tags": [
+        "branch",
+        "meeting-state",
+        "merge",
+        "refactor"
+      ],
+      "files": [
+        "README.md",
+        "backend/http_app.py",
+        "backend/llm.py",
+        "backend/meeting/",
+        "dist/app.js"
+      ],
+      "branch": "feat/online-summary",
+      "commit": "304048f",
+      "path": "sessions/2026/09/20260915T154307Z-merge-bounded-meeting-state-branch-into-main.md"
+    },
+    {
       "id": "20260915T153833Z-replace-the-rolling-summary-with-bounded-meeting-state",
       "created_at": "2026-09-15T15:38:33Z",
       "title": "Replace the rolling summary with bounded meeting state",
