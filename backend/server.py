@@ -13,9 +13,10 @@ if __package__ in (None, ""):  # allow `python backend/server.py`
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.asr import BackendState
-from backend.config import DEFAULT_ASR_MODEL, DEFAULT_SUMMARY_MODEL
+from backend.config import DEFAULT_ASR_MODEL, DEFAULT_MEETING_DB, DEFAULT_SUMMARY_MODEL
 from backend.http_app import create_server
-from backend.summary import SummaryState
+from backend.llm import LLMState
+from backend.meeting.service import MeetingService
 
 
 def main() -> None:
@@ -37,13 +38,19 @@ def main() -> None:
         default=os.environ.get("MURMUR_SUMMARY_MODEL", DEFAULT_SUMMARY_MODEL),
     )
     parser.add_argument(
+        "--meeting-db",
+        default=os.environ.get("MURMUR_MEETING_DB", str(DEFAULT_MEETING_DB)),
+        help="SQLite file holding meeting state, section archive and raw ASR",
+    )
+    parser.add_argument(
         "--model",
         default=os.environ.get("MURMUR_ASR_MODEL", DEFAULT_ASR_MODEL),
     )
     args = parser.parse_args()
 
     state = BackendState()
-    summary_state = SummaryState()
+    summary_state = LLMState("summary")
+    meetings = MeetingService(llm_state=summary_state, db_path=args.meeting_db)
 
     def load_models() -> None:
         # Both MLX runtimes lazily import transformers. Initializing them in
@@ -51,13 +58,16 @@ def main() -> None:
         # model startup off the HTTP thread but serialize the two loads.
         state.load(args.backend, args.model)
         summary_state.load(args.summary_backend, args.summary_model)
+        if summary_state.llm is not None:
+            # Hands the engine the real tokenizer so budgets match inference.
+            meetings.attach_llm(summary_state.llm)
 
     threading.Thread(
         target=load_models,
         name="model-loader",
         daemon=True,
     ).start()
-    server = create_server(args.host, args.port, state, summary_state=summary_state)
+    server = create_server(args.host, args.port, state, meeting_service=meetings)
     print(f"Murmur is available at http://{args.host}:{server.server_port}")
     print("The ASR and summary models are loading in the background. Keep this window open.")
     try:
@@ -65,6 +75,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping Murmur.")
     finally:
+        meetings.stop()
         server.server_close()
 
 

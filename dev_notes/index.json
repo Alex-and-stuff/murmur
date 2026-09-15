@@ -2,6 +2,32 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T153330Z-split-the-backend-server-into-focused-modules",
+      "created_at": "2026-09-15T15:33:30Z",
+      "title": "Split the backend server into focused modules",
+      "status": "completed",
+      "tags": [
+        "architecture",
+        "backend",
+        "refactor",
+        "tests"
+      ],
+      "files": [
+        "README.md",
+        "backend/asr.py",
+        "backend/config.py",
+        "backend/http_app.py",
+        "backend/media.py",
+        "backend/server.py",
+        "backend/summary.py",
+        "tests/test_http.py",
+        "tests/test_summary.py"
+      ],
+      "branch": "feat/online-summary",
+      "commit": "bca36e3",
+      "path": "sessions/2026/09/20260915T153330Z-split-the-backend-server-into-focused-modules.md"
+    },
+    {
       "id": "20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics",
       "created_at": "2026-09-15T14:35:28Z",
       "title": "Add online summary control and inference context diagnostics",

@@ -8,6 +8,7 @@ Generated index. Session files are the source of truth.
 
 ## Completed
 
+- [Split the backend server into focused modules](sessions/2026/09/20260915T153330Z-split-the-backend-server-into-focused-modules.md) — 2026-09-15T15:33:30Z — architecture, backend, refactor, tests
 - [Add online summary control and inference context diagnostics](sessions/2026/09/20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics.md) — 2026-09-15T14:35:28Z — api, debug, frontend, summary
 - [Prevent incremental summary changelog drift](sessions/2026/09/20260915T125145Z-prevent-incremental-summary-changelog-drift.md) — 2026-09-15T12:51:45Z — prompt, quality, realtime, summary
 - [Implement real-time rolling meeting summaries](sessions/2026/09/20260915T123707Z-implement-real-time-rolling-meeting-summaries.md) — 2026-09-15T12:37:07Z — api, frontend, mlx, realtime, summary

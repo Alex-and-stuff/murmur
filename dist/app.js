@@ -4,29 +4,22 @@ const MAX_CHUNK_SECONDS = 16;
 const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
-const ROLLING_SUMMARY_DEBOUNCE_MS = 1600;
-const INITIAL_SUMMARY_SEGMENTS = 2;
-const FULL_SUMMARY_REBASE_SEGMENTS = 6;
-const FULL_SUMMARY_REBASE_MAX_CHARS = 20000;
-const SUMMARY_BACKLOG_SAFETY_FAILURES = 2;
-const SUMMARY_BACKLOG_KEEP_SEGMENTS = 15;
+const STATE_POLL_MS = 2000;
 
-const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
+const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
 let summaryStatus = "loading";
-let summaryResult = null;
-let summaryPending = false;
-let onlineSummaryEnabled = true;
-let summaryTimer = null;
-let summaryRequestNewSegments = 0;
-let coveredSegmentIds = new Set();
-let summaryConsecutiveFailures = 0;
+let meetingId = null;
+let meetingState = null;
+let finalDocument = null;
+let rolloutPending = false;
+let autoRolloutEnabled = true;
+let statePollTimer = null;
 let nextSegmentId = 1;
-let lastFullSummarySegmentCount = 0;
 let sessionGeneration = 0;
 let pendingRequests = 0;
 let healthTimer = null;
@@ -190,8 +183,7 @@ async function transcribeChunk(pcm, start, end, generation) {
       segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
       segments.sort((a, b) => a.start - b.start);
       renderCompleted();
-      scheduleRollingSummary();
-      renderSummary();
+      sendSegment({ text, start: payload.start, end: payload.end });
     }
   } catch (error) {
     showToast(`逐字稿暫時無法產生：${error.message}`);
@@ -223,11 +215,13 @@ function syncUI() {
   el.progressBar.style.width = `${ratio * 100}%`;
   const latest = segments.at(-1);
   el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
-  el.summaryButton.disabled = summaryPending || summaryStatus !== "ready" || !segments.length;
-  el.summaryButton.textContent = summaryPending ? "更新中…" : summaryResult ? "立即重整" : "立即產生";
-  el.onlineSummaryToggle.setAttribute("aria-checked", String(onlineSummaryEnabled));
-  el.onlineSummaryToggle.classList.toggle("enabled", onlineSummaryEnabled);
-  el.copySummaryButton.disabled = !summaryResult;
+  const pending = meetingState ? meetingState.pending_segment_count : 0;
+  el.summaryButton.disabled = rolloutPending || summaryStatus !== "ready" || !meetingId || !pending;
+  el.summaryButton.textContent = rolloutPending ? "更新中…" : "立即整理";
+  el.finalizeButton.disabled = rolloutPending || summaryStatus !== "ready" || !meetingId || !segments.length;
+  el.onlineSummaryToggle.setAttribute("aria-checked", String(autoRolloutEnabled));
+  el.onlineSummaryToggle.classList.toggle("enabled", autoRolloutEnabled);
+  el.copySummaryButton.disabled = !meetingState || !meetingState.current_section;
 }
 
 function renderCompleted() {
@@ -288,19 +282,20 @@ function bindMedia(media) {
 function resetTranscript() {
   sessionGeneration++;
   segments = [];
-  summaryResult = null;
-  coveredSegmentIds = new Set();
-  summaryConsecutiveFailures = 0;
+  meetingId = null;
+  meetingState = null;
+  finalDocument = null;
+  rolloutPending = false;
   nextSegmentId = 1;
-  lastFullSummarySegmentCount = 0;
   inferenceEvents = [];
-  clearTimeout(summaryTimer);
-  summaryTimer = null;
+  clearTimeout(statePollTimer);
+  statePollTimer = null;
   capturer.discard();
   renderCompleted();
   renderSummary();
   renderInferenceEvents();
   syncUI();
+  startMeeting();
 }
 
 function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toastMessage }) {
@@ -385,125 +380,180 @@ async function copyTranscript() {
   try { await navigator.clipboard.writeText(text); showToast("已複製目前的逐字稿"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
 }
 
+function sectionBlock(title, items) {
+  return items && items.length
+    ? `<div class="summary-block"><h3>${title}</h3><ul>${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul></div>`
+    : "";
+}
+
+function actionLines(items) {
+  return (items || []).map(item => {
+    const meta = [item.owner && `負責：${item.owner}`, item.due && `期限：${item.due}`].filter(Boolean).join(" · ");
+    return meta ? `${item.description}（${meta}）` : item.description;
+  });
+}
+
 function renderSummary() {
-  if (!summaryResult) {
-    const waiting = segments.length && segments.length < INITIAL_SUMMARY_SEGMENTS;
-    const title = summaryPending ? "正在建立第一版摘要…" : !onlineSummaryEnabled ? "Online summary 已關閉" : waiting ? "再多一段就開始整理" : "摘要會隨逐字稿出現在這裡";
-    const detail = summaryPending ? `正在整合前 ${summaryRequestNewSegments} 段穩定逐字稿。` : !onlineSummaryEnabled ? "仍可使用「立即產生」手動建立摘要。" : waiting ? "累積足夠上下文後會自動開始。" : "每當新段落完成，系統會在背景滾動更新會議重點。";
-    el.summaryContent.innerHTML = `<div class="summary-empty"><strong>${title}</strong><p>${detail}</p></div>`;
-    el.summaryMeta.textContent = summaryPending ? "Real-time 滾動摘要更新中" : onlineSummaryEnabled ? "自動追蹤穩定的逐字稿段落。" : "自動更新已暫停。";
+  const section = meetingState && meetingState.current_section;
+  const index = (meetingState && meetingState.section_index) || [];
+  if (finalDocument) {
+    const topics = finalDocument.topics.map(topic => `<li><strong>${escapeHTML(topic.title)}</strong>：${escapeHTML(topic.summary)}</li>`).join("");
+    el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>會議總結</h3><p>${escapeHTML(finalDocument.executive_summary)}</p></div><div class="summary-block"><h3>各主題</h3><ul>${topics}</ul></div></div><div>${sectionBlock("決策", finalDocument.decisions)}${sectionBlock("待辦事項", actionLines(finalDocument.action_items))}${sectionBlock("風險", finalDocument.risks)}${sectionBlock("未解問題", finalDocument.open_questions)}</div></div>`;
+    el.summaryMeta.textContent = `會議已彙整 · ${finalDocument.topics.length} 個主題 · ${finalDocument.finalizer}`;
     syncUI();
     return;
   }
-  const list = (title, items) => items.length ? `<div class="summary-block"><h3>${title}</h3><ul>${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul></div>` : "";
-  const actions = summaryResult.action_items.map(item => {
-    const meta = [item.owner && `負責：${item.owner}`, item.due && `期限：${item.due}`].filter(Boolean).join(" · ");
-    return meta ? `${item.task}（${meta}）` : item.task;
-  });
-  el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>摘要</h3><p>${escapeHTML(summaryResult.summary)}</p></div>${list("重點", summaryResult.key_points)}</div><div>${list("決策", summaryResult.decisions)}${list("待辦事項", actions)}</div></div>`;
-  const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id)).length;
-  el.summaryMeta.textContent = !onlineSummaryEnabled && !summaryPending
-    ? `Online summary 已關閉 · 已涵蓋 ${coveredSegmentIds.size} 段`
-    : summaryPending
-    ? `正在整合 ${summaryRequestNewSegments} 段新逐字稿…`
-    : uncovered
-      ? `已涵蓋 ${coveredSegmentIds.size} 段 · ${uncovered} 段等待更新`
-      : `已同步 ${coveredSegmentIds.size} 段逐字稿 · 上次生成 ${Number(summaryResult.inference_seconds || 0).toFixed(1)} 秒`;
-  syncUI();
-}
-
-function summaryForRequest() {
-  if (!summaryResult) return null;
-  return {
-    summary: summaryResult.summary,
-    key_points: summaryResult.key_points,
-    decisions: summaryResult.decisions,
-    action_items: summaryResult.action_items,
-  };
-}
-
-function scheduleRollingSummary({ immediate = false } = {}) {
-  clearTimeout(summaryTimer);
-  summaryTimer = null;
-  if (!onlineSummaryEnabled || summaryStatus !== "ready" || summaryPending || !segments.length) return;
-  const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id));
-  const required = summaryResult ? 1 : INITIAL_SUMMARY_SEGMENTS;
-  if (uncovered.length < required) return;
-  summaryTimer = setTimeout(() => generateSummary(false), immediate ? 0 : ROLLING_SUMMARY_DEBOUNCE_MS);
-}
-
-async function generateSummary(forceFull = false) {
-  if (!segments.length || summaryPending) return;
-  clearTimeout(summaryTimer);
-  summaryTimer = null;
-  const generation = sessionGeneration;
-  const snapshot = segments.slice();
-  const transcriptChars = snapshot.reduce((total, segment) => total + segment.text.length + 32, 0);
-  const rebaseDue = summaryResult
-    && snapshot.length - lastFullSummarySegmentCount >= FULL_SUMMARY_REBASE_SEGMENTS
-    && transcriptChars <= FULL_SUMMARY_REBASE_MAX_CHARS;
-  const incremental = !forceFull && !rebaseDue && summaryResult && coveredSegmentIds.size;
-  let requestSegments = incremental
-    ? snapshot.filter(segment => !coveredSegmentIds.has(segment.id))
-    : snapshot;
-  if (!requestSegments.length) return;
-  let droppedForSafety = [];
-  if (
-    incremental
-    && summaryConsecutiveFailures >= SUMMARY_BACKLOG_SAFETY_FAILURES
-    && requestSegments.length > SUMMARY_BACKLOG_KEEP_SEGMENTS
-  ) {
-    const keepFrom = requestSegments.length - SUMMARY_BACKLOG_KEEP_SEGMENTS;
-    droppedForSafety = requestSegments.slice(0, keepFrom);
-    requestSegments = requestSegments.slice(keepFrom);
-    showToast(`摘要連續失敗，先略過 ${droppedForSafety.length} 段較舊的逐字稿以避免卡住`);
-  }
-  summaryPending = true;
-  summaryRequestNewSegments = requestSegments.length;
-  let completed = false;
-  renderSummary();
-  syncUI();
-  try {
-    const response = await fetch("/api/summarize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        segments: requestSegments.map(({ start, end, text }) => ({ start, end, text })),
-        ...(incremental ? { previous_summary: summaryForRequest() } : {}),
-      }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || payload.error || "摘要失敗");
-    if (generation !== sessionGeneration) return;
-    summaryResult = payload;
-    addInferenceEvent({
-      type: "SUMMARY",
-      context: Number.isFinite(payload.context_tokens) ? `${payload.context_tokens.toLocaleString()} tokens` : `${Number(payload.input_chars || 0).toLocaleString()} 字元`,
-      detail: `${payload.input_segments || requestSegments.length} 段 · ${payload.mode === "incremental" ? "incremental" : "full"}`,
-      latency: payload.inference_seconds,
-    });
-    coveredSegmentIds = forceFull || !incremental
-      ? new Set(snapshot.map(segment => segment.id))
-      : new Set([
-          ...coveredSegmentIds,
-          ...requestSegments.map(segment => segment.id),
-          ...droppedForSafety.map(segment => segment.id),
-        ]);
-    if (!incremental) lastFullSummarySegmentCount = snapshot.length;
-    summaryConsecutiveFailures = 0;
-    completed = true;
-    renderSummary();
-  } catch (error) {
-    summaryConsecutiveFailures++;
-    showToast(`摘要暫時無法產生：${error.message}`);
-    checkHealth();
-  } finally {
-    summaryPending = false;
-    summaryRequestNewSegments = 0;
-    if (completed && generation === sessionGeneration) scheduleRollingSummary({ immediate: true });
-    renderSummary();
+  if (!section) {
+    const waiting = Boolean(meetingState && meetingState.pending_segment_count);
+    const title = rolloutPending ? "正在建立第一個主題…" : waiting ? "累積中，稍後自動整理" : "會議狀態會出現在這裡";
+    const detail = rolloutPending
+      ? "模型正在把逐字稿整理成第一個主題。"
+      : waiting
+      ? `已收到 ${meetingState.pending_segment_count} 段逐字稿，達到門檻就會整理。`
+      : "每次整理只會送出「主題索引 + 目前主題 + 新逐字稿」，長度固定。";
+    el.summaryContent.innerHTML = `<div class="summary-empty"><strong>${title}</strong><p>${detail}</p></div>`;
+    el.summaryMeta.textContent = autoRolloutEnabled ? "自動整理已開啟。" : "自動整理已暫停。";
     syncUI();
+    return;
   }
+  const indexList = index.length
+    ? `<div class="summary-block"><h3>先前主題（已封存）</h3><ul>${index.map(entry => `<li><strong>${escapeHTML(entry.title)}</strong> — ${escapeHTML(entry.short_descriptor)}</li>`).join("")}</ul></div>`
+    : "";
+  el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>目前主題：${escapeHTML(section.title)}</h3><p>${escapeHTML(section.summary)}</p></div>${sectionBlock("重點", section.key_points)}${indexList}</div><div>${sectionBlock("決策", section.decisions)}${sectionBlock("待辦事項", actionLines(section.action_items))}${sectionBlock("未解問題", section.open_questions)}</div></div>`;
+  const pending = meetingState.pending_segment_count;
+  el.summaryMeta.textContent = rolloutPending
+    ? "正在整理新的逐字稿…"
+    : pending
+    ? `已封存 ${index.length} 個主題 · ${pending} 段待整理`
+    : `已封存 ${index.length} 個主題 · 第 ${meetingState.state_version} 版狀態`;
+  syncUI();
+}
+
+async function meetingRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || "POST",
+    headers: options.body ? { "Content-Type": "application/json" } : undefined,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || payload.error || "會議狀態更新失敗");
+  return payload;
+}
+
+async function startMeeting() {
+  const generation = sessionGeneration;
+  try {
+    const payload = await meetingRequest("/api/meetings");
+    if (generation !== sessionGeneration) return;
+    meetingId = payload.meeting_id;
+    applyState(payload.state);
+    if (!autoRolloutEnabled) meetingRequest(`/api/meetings/${meetingId}/auto`, { body: { enabled: false } }).catch(() => {});
+    schedulePoll();
+  } catch (error) {
+    showToast(`無法建立會議狀態：${error.message}`);
+  }
+}
+
+async function sendSegment(segment) {
+  if (!meetingId) return;
+  const generation = sessionGeneration;
+  try {
+    const payload = await meetingRequest(`/api/meetings/${meetingId}/segments`, { body: { segments: [segment] } });
+    if (generation === sessionGeneration) applyState(payload.state);
+  } catch (error) {
+    showToast(`逐字稿未能送進會議狀態：${error.message}`);
+  }
+}
+
+function applyState(state) {
+  meetingState = state;
+  finalDocument = state.final_document || finalDocument;
+  renderSummary();
+  renderInferenceEvents();
+  syncUI();
+}
+
+function schedulePoll() {
+  clearTimeout(statePollTimer);
+  statePollTimer = setTimeout(pollState, STATE_POLL_MS);
+}
+
+async function pollState() {
+  if (!meetingId) return;
+  const generation = sessionGeneration;
+  try {
+    const state = await meetingRequest(`/api/meetings/${meetingId}/state`, { method: "GET" });
+    if (generation === sessionGeneration) applyState(state);
+  } catch (_) {
+    // A transient failure just means the next poll tries again.
+  } finally {
+    if (generation === sessionGeneration) schedulePoll();
+  }
+}
+
+async function forceRollout() {
+  if (!meetingId || rolloutPending) return;
+  rolloutPending = true;
+  renderSummary();
+  try {
+    const payload = await meetingRequest(`/api/meetings/${meetingId}/rollout`);
+    applyState(payload.state);
+    if (payload.status === "failed") showToast(`整理失敗：${payload.reason}`);
+    if (payload.status === "skipped" && payload.reason === "no_pending_segments") showToast("沒有待整理的逐字稿");
+  } catch (error) {
+    showToast(`整理失敗：${error.message}`);
+  } finally {
+    rolloutPending = false;
+    renderSummary();
+  }
+}
+
+async function finalizeMeeting() {
+  if (!meetingId || rolloutPending) return;
+  rolloutPending = true;
+  renderSummary();
+  showToast("正在整理剩餘逐字稿並彙整會議紀錄…");
+  try {
+    const payload = await meetingRequest(`/api/meetings/${meetingId}/finalize`);
+    finalDocument = payload.document;
+    applyState(payload.state);
+  } catch (error) {
+    showToast(`會議彙整失敗：${error.message}`);
+  } finally {
+    rolloutPending = false;
+    renderSummary();
+  }
+}
+
+function toggleOnlineSummary() {
+  autoRolloutEnabled = !autoRolloutEnabled;
+  showToast(autoRolloutEnabled ? "自動整理已開啟" : "自動整理已暫停；逐字稿仍會保留並可手動整理");
+  if (meetingId) {
+    meetingRequest(`/api/meetings/${meetingId}/auto`, { body: { enabled: autoRolloutEnabled } })
+      .then(payload => applyState(payload.state))
+      .catch(error => showToast(`切換失敗：${error.message}`));
+  }
+  renderSummary();
+}
+
+async function copySummary() {
+  const section = meetingState && meetingState.current_section;
+  if (!section && !finalDocument) return;
+  const source = finalDocument
+    ? [
+        `會議總結\n${finalDocument.executive_summary}`,
+        finalDocument.topics.map(topic => `${topic.title}：${topic.summary}`).join("\n"),
+        finalDocument.decisions.length ? `決策\n${finalDocument.decisions.map(item => `- ${item}`).join("\n")}` : "",
+        finalDocument.action_items.length ? `待辦事項\n${actionLines(finalDocument.action_items).map(item => `- ${item}`).join("\n")}` : "",
+      ]
+    : [
+        `${section.title}\n${section.summary}`,
+        section.key_points.length ? `重點\n${section.key_points.map(item => `- ${item}`).join("\n")}` : "",
+        section.decisions.length ? `決策\n${section.decisions.map(item => `- ${item}`).join("\n")}` : "",
+        section.action_items.length ? `待辦事項\n${actionLines(section.action_items).map(item => `- ${item}`).join("\n")}` : "",
+      ];
+  try { await navigator.clipboard.writeText(source.filter(Boolean).join("\n\n")); showToast("已複製會議內容"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
 }
 
 function addInferenceEvent(event) {
@@ -511,38 +561,28 @@ function addInferenceEvent(event) {
   renderInferenceEvents();
 }
 
+function rolloutEvents() {
+  const rollouts = (meetingState && meetingState.rollouts) || [];
+  return rollouts.map(rollout => ({
+    type: "STATE",
+    context: `${Number(rollout.total_input || 0).toLocaleString()} / ${Number(rollout.budget_input || 0).toLocaleString()} tokens`,
+    detail: [
+      rollout.operation || "rollout",
+      `索引 ${rollout.index || 0} · 主題 ${rollout.current_section || 0} · 新逐字稿 ${rollout.pending_asr || 0}`,
+      (rollout.compaction_applied || []).length ? `compaction：${rollout.compaction_applied.join(", ")}` : "",
+    ].filter(Boolean).join(" · "),
+    latency: Number(rollout.latency_ms || 0) / 1000,
+  }));
+}
+
 function renderInferenceEvents() {
-  el.contextCount.textContent = `${inferenceEvents.length} 次推論`;
-  if (!inferenceEvents.length) {
+  const events = [...rolloutEvents(), ...inferenceEvents];
+  el.contextCount.textContent = `${events.length} 次推論`;
+  if (!events.length) {
     el.contextList.innerHTML = `<p>推論開始後會在這裡顯示每次的 context 長度。</p>`;
     return;
   }
-  el.contextList.innerHTML = inferenceEvents.map(event => `<article><span class="context-type ${event.type.toLowerCase()}">${event.type}</span><strong>${event.context}</strong><small>${event.detail}</small><time>${Number(event.latency || 0).toFixed(2)}s</time></article>`).join("");
-}
-
-function toggleOnlineSummary() {
-  onlineSummaryEnabled = !onlineSummaryEnabled;
-  if (!onlineSummaryEnabled) {
-    clearTimeout(summaryTimer);
-    summaryTimer = null;
-    showToast("Online summary 已關閉；仍可手動產生摘要");
-  } else {
-    showToast("Online summary 已開啟");
-    scheduleRollingSummary({ immediate: true });
-  }
-  renderSummary();
-  syncUI();
-}
-
-async function copySummary() {
-  if (!summaryResult) return;
-  const sections = [
-    `摘要\n${summaryResult.summary}`,
-    summaryResult.key_points.length ? `重點\n${summaryResult.key_points.map(item => `- ${item}`).join("\n")}` : "",
-    summaryResult.decisions.length ? `決策\n${summaryResult.decisions.map(item => `- ${item}`).join("\n")}` : "",
-    summaryResult.action_items.length ? `待辦事項\n${summaryResult.action_items.map(item => `- ${item.task}${item.owner ? `（${item.owner}）` : ""}`).join("\n")}` : "",
-  ].filter(Boolean).join("\n\n");
-  try { await navigator.clipboard.writeText(sections); showToast("已複製摘要"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
+  el.contextList.innerHTML = events.map(event => `<article><span class="context-type ${event.type.toLowerCase()}">${event.type}</span><strong>${escapeHTML(event.context)}</strong><small>${escapeHTML(event.detail)}</small><time>${Number(event.latency || 0).toFixed(2)}s</time></article>`).join("");
 }
 
 async function checkHealth() {
@@ -554,7 +594,10 @@ async function checkHealth() {
     serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
     summaryStatus = health.summary?.status === "ready" ? "ready" : health.summary?.status === "loading" ? "loading" : "error";
     el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
-    el.summaryRuntime.textContent = health.summary?.model || (summaryStatus === "loading" ? "摘要模型載入中" : "摘要模型無法使用");
+    const budget = health.summary?.max_context_tokens;
+    el.summaryRuntime.textContent = health.summary?.model
+      ? `${health.summary.model} · 每輪 ${budget} tokens 預算`
+      : summaryStatus === "loading" ? "摘要模型載入中" : "摘要模型無法使用";
   } catch (_) {
     serverStatus = "error";
     summaryStatus = "error";
@@ -562,7 +605,7 @@ async function checkHealth() {
     el.summaryRuntime.textContent = "未連接本機 inference service";
   }
   updatePlaybackState();
-  if (previousSummaryStatus !== "ready" && summaryStatus === "ready") scheduleRollingSummary();
+  if (previousSummaryStatus !== "ready" && summaryStatus === "ready" && !meetingId) startMeeting();
   clearTimeout(healthTimer);
   if (serverStatus !== "ready" || summaryStatus === "loading") healthTimer = setTimeout(checkHealth, 2000);
   return serverStatus;
@@ -582,7 +625,8 @@ el.fileInput.addEventListener("change", event => {
   event.target.value = "";
 });
 el.copyButton.addEventListener("click", copyTranscript);
-el.summaryButton.addEventListener("click", () => generateSummary(true));
+el.summaryButton.addEventListener("click", forceRollout);
+el.finalizeButton.addEventListener("click", finalizeMeeting);
 el.onlineSummaryToggle.addEventListener("click", toggleOnlineSummary);
 el.copySummaryButton.addEventListener("click", copySummary);
 el.youtubeForm.addEventListener("submit", event => {
@@ -599,3 +643,4 @@ renderCompleted();
 renderSummary();
 renderInferenceEvents();
 checkHealth();
+startMeeting();

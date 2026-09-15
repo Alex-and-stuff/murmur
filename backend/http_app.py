@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import traceback
@@ -16,14 +17,15 @@ from backend.asr import BackendState
 from backend.config import (
     MAX_AUDIO_BYTES,
     MAX_FETCH_BODY_BYTES,
-    MAX_SUMMARY_BODY_BYTES,
-    MAX_SUMMARY_TRANSCRIPT_CHARS,
+    MAX_SEGMENTS_BODY_BYTES,
     SAMPLE_RATE,
     STATIC_DIR,
     UPLOADS_DIR,
 )
 from backend.media import MediaFetchError, MediaFetcher, YtDlpFetcher, is_allowed_media_url
-from backend.summary import SummaryState, normalize_summary
+from backend.meeting.service import MeetingService
+
+MEETING_PATH = re.compile(r"^/api/meetings/([A-Za-z0-9_-]{1,64})(/[a-z-]+)?$")
 
 
 class MurmurHandler(SimpleHTTPRequestHandler):
@@ -48,8 +50,8 @@ class MurmurHandler(SimpleHTTPRequestHandler):
         return self.server.media_fetcher  # type: ignore[attr-defined]
 
     @property
-    def summary_state(self) -> SummaryState:
-        return self.server.summary_state  # type: ignore[attr-defined]
+    def meetings(self) -> MeetingService:
+        return self.server.meeting_service  # type: ignore[attr-defined]
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")
@@ -63,26 +65,119 @@ class MurmurHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json(self, max_bytes: int) -> dict[str, object] | None:
+        if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+            self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "expected_json"})
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > max_bytes:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_body"})
+            return None
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+            return None
+        if not isinstance(payload, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+            return None
+        return payload
+
+    # -- GET ---------------------------------------------------------------
+
     def do_GET(self) -> None:
-        if urlparse(self.path).path == "/api/health":
+        path = urlparse(self.path).path
+        if path == "/api/health":
             payload = self.state.snapshot()
-            payload["summary"] = self.summary_state.snapshot()
+            payload["summary"] = self.meetings.snapshot()
             self._json(HTTPStatus.OK, payload)
             return
+        match = MEETING_PATH.match(path)
+        if match:
+            self._handle_meeting_get(match.group(1), (match.group(2) or "").lstrip("/"))
+            return
         super().do_GET()
+
+    def _handle_meeting_get(self, meeting_id: str, action: str) -> None:
+        if not self.meetings.store.meeting_exists(meeting_id):
+            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown_meeting"})
+            return
+        if action in ("", "state"):
+            self._json(HTTPStatus.OK, self.meetings.state(meeting_id))
+            return
+        if action == "transcript":
+            self._json(HTTPStatus.OK, self.meetings.transcript(meeting_id))
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    # -- POST --------------------------------------------------------------
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/fetch-media":
             self._handle_fetch_media()
             return
-        if path == "/api/summarize":
-            self._handle_summarize()
+        if path == "/api/meetings":
+            self._json(HTTPStatus.OK, self.meetings.create_meeting())
+            return
+        match = MEETING_PATH.match(path)
+        if match:
+            self._handle_meeting_post(match.group(1), (match.group(2) or "").lstrip("/"))
             return
         if path != "/api/transcribe":
             self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
+        self._handle_transcribe()
 
+    def _handle_meeting_post(self, meeting_id: str, action: str) -> None:
+        if not self.meetings.store.meeting_exists(meeting_id):
+            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown_meeting"})
+            return
+        try:
+            if action == "segments":
+                payload = self._read_json(MAX_SEGMENTS_BODY_BYTES)
+                if payload is None:
+                    return
+                segments = payload.get("segments")
+                if not isinstance(segments, list) or not segments:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_segments"})
+                    return
+                if any(not isinstance(item, dict) for item in segments):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_segments"})
+                    return
+                self._json(HTTPStatus.OK, self.meetings.add_segments(meeting_id, segments))
+                return
+            if action == "auto":
+                payload = self._read_json(1024)
+                if payload is None:
+                    return
+                enabled = bool(payload.get("enabled", True))
+                self._json(HTTPStatus.OK, self.meetings.set_auto_rollout(meeting_id, enabled))
+                return
+            if action == "rollout":
+                self._json(HTTPStatus.OK, self.meetings.rollout(meeting_id))
+                return
+            if action == "finalize":
+                self._json(HTTPStatus.OK, self.meetings.finalize(meeting_id))
+                return
+        except Exception as exc:
+            print(
+                f"[{self.log_date_time_string()}] /api/meetings/{meeting_id}/{action} failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "meeting_request_failed", "detail": f"{type(exc).__name__}: {exc}"},
+            )
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def _handle_transcribe(self) -> None:
         snapshot = self.state.snapshot()
         if snapshot["status"] != "ready" or self.state.backend is None:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "model_not_ready", **snapshot})
@@ -129,90 +224,11 @@ class MurmurHandler(SimpleHTTPRequestHandler):
                 {"error": "inference_failed", "detail": f"{type(exc).__name__}: {exc}"},
             )
 
-    def _handle_summarize(self) -> None:
-        snapshot = self.summary_state.snapshot()
-        if snapshot["status"] != "ready" or self.summary_state.backend is None:
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "summary_model_not_ready", **snapshot})
-            return
-        if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
-            self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "expected_json"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        if length <= 0 or length > MAX_SUMMARY_BODY_BYTES:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_body"})
-            return
-        try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            segments = payload["segments"]
-            if not isinstance(segments, list) or not segments:
-                raise ValueError("segments must be a non-empty list")
-            lines = []
-            for item in segments:
-                if not isinstance(item, dict):
-                    raise ValueError("invalid segment")
-                text = str(item.get("text") or "").strip()
-                if not text:
-                    continue
-                start = max(0.0, float(item.get("start", 0)))
-                end = max(start, float(item.get("end", start)))
-                lines.append(f"[{start:.1f}s–{end:.1f}s] {text}")
-            transcript = "\n".join(lines)
-            if not transcript:
-                raise ValueError("transcript is empty")
-            if len(transcript) > MAX_SUMMARY_TRANSCRIPT_CHARS:
-                self._json(
-                    HTTPStatus.BAD_REQUEST,
-                    {"error": "transcript_too_long", "max_chars": MAX_SUMMARY_TRANSCRIPT_CHARS},
-                )
-                return
-            raw_previous = payload.get("previous_summary")
-            previous_summary = normalize_summary(raw_previous) if raw_previous is not None else None
-        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_transcript", "detail": str(exc)})
-            return
-
-        try:
-            began = time.monotonic()
-            result = self.summary_state.backend.summarize(transcript, previous_summary)
-            result["inference_seconds"] = round(time.monotonic() - began, 3)
-            result["mode"] = "incremental" if previous_summary else "full"
-            result["input_chars"] = len(transcript) + (
-                len(json.dumps(previous_summary, ensure_ascii=False)) if previous_summary else 0
-            )
-            result["input_segments"] = len(lines)
-            self._json(HTTPStatus.OK, result)
-        except Exception as exc:
-            print(
-                f"[{self.log_date_time_string()}] /api/summarize failed "
-                f"(transcript_chars={len(transcript)}, has_previous_summary={previous_summary is not None}): "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            traceback.print_exc(file=sys.stderr)
-            self._json(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": "summary_failed", "detail": f"{type(exc).__name__}: {exc}"},
-            )
-
     def _handle_fetch_media(self) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        if length <= 0 or length > MAX_FETCH_BODY_BYTES:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_body"})
+        payload = self._read_json(MAX_FETCH_BODY_BYTES)
+        if payload is None:
             return
-
-        try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            url = str(payload["url"]).strip()
-        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
-            return
-
+        url = str(payload.get("url") or "").strip()
         if not url or not is_allowed_media_url(url):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "unsupported_url", "detail": "只接受 YouTube 連結"})
             return
@@ -237,13 +253,12 @@ def create_server(
     port: int,
     state: BackendState,
     media_fetcher: MediaFetcher | None = None,
-    summary_state: SummaryState | None = None,
+    meeting_service: MeetingService | None = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), MurmurHandler)
     server.backend_state = state  # type: ignore[attr-defined]
     server.media_fetcher = media_fetcher or YtDlpFetcher(UPLOADS_DIR)  # type: ignore[attr-defined]
-    if summary_state is None:
-        summary_state = SummaryState()
-        summary_state.load("fixture", "unused")
-    server.summary_state = summary_state  # type: ignore[attr-defined]
+    service = meeting_service or MeetingService()
+    service.start()
+    server.meeting_service = service  # type: ignore[attr-defined]
     return server
