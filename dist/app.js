@@ -8,6 +8,8 @@ const ROLLING_SUMMARY_DEBOUNCE_MS = 1600;
 const INITIAL_SUMMARY_SEGMENTS = 2;
 const FULL_SUMMARY_REBASE_SEGMENTS = 6;
 const FULL_SUMMARY_REBASE_MAX_CHARS = 20000;
+const SUMMARY_BACKLOG_SAFETY_FAILURES = 2;
+const SUMMARY_BACKLOG_KEEP_SEGMENTS = 15;
 
 const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
@@ -21,6 +23,7 @@ let summaryPending = false;
 let summaryTimer = null;
 let summaryRequestNewSegments = 0;
 let coveredSegmentIds = new Set();
+let summaryConsecutiveFailures = 0;
 let nextSegmentId = 1;
 let lastFullSummarySegmentCount = 0;
 let sessionGeneration = 0;
@@ -282,6 +285,7 @@ function resetTranscript() {
   segments = [];
   summaryResult = null;
   coveredSegmentIds = new Set();
+  summaryConsecutiveFailures = 0;
   nextSegmentId = 1;
   lastFullSummarySegmentCount = 0;
   clearTimeout(summaryTimer);
@@ -428,10 +432,21 @@ async function generateSummary(forceFull = false) {
     && snapshot.length - lastFullSummarySegmentCount >= FULL_SUMMARY_REBASE_SEGMENTS
     && transcriptChars <= FULL_SUMMARY_REBASE_MAX_CHARS;
   const incremental = !forceFull && !rebaseDue && summaryResult && coveredSegmentIds.size;
-  const requestSegments = incremental
+  let requestSegments = incremental
     ? snapshot.filter(segment => !coveredSegmentIds.has(segment.id))
     : snapshot;
   if (!requestSegments.length) return;
+  let droppedForSafety = [];
+  if (
+    incremental
+    && summaryConsecutiveFailures >= SUMMARY_BACKLOG_SAFETY_FAILURES
+    && requestSegments.length > SUMMARY_BACKLOG_KEEP_SEGMENTS
+  ) {
+    const keepFrom = requestSegments.length - SUMMARY_BACKLOG_KEEP_SEGMENTS;
+    droppedForSafety = requestSegments.slice(0, keepFrom);
+    requestSegments = requestSegments.slice(keepFrom);
+    showToast(`摘要連續失敗，先略過 ${droppedForSafety.length} 段較舊的逐字稿以避免卡住`);
+  }
   summaryPending = true;
   summaryRequestNewSegments = requestSegments.length;
   let completed = false;
@@ -452,11 +467,17 @@ async function generateSummary(forceFull = false) {
     summaryResult = payload;
     coveredSegmentIds = forceFull || !incremental
       ? new Set(snapshot.map(segment => segment.id))
-      : new Set([...coveredSegmentIds, ...requestSegments.map(segment => segment.id)]);
+      : new Set([
+          ...coveredSegmentIds,
+          ...requestSegments.map(segment => segment.id),
+          ...droppedForSafety.map(segment => segment.id),
+        ]);
     if (!incremental) lastFullSummarySegmentCount = snapshot.length;
+    summaryConsecutiveFailures = 0;
     completed = true;
     renderSummary();
   } catch (error) {
+    summaryConsecutiveFailures++;
     showToast(`摘要暫時無法產生：${error.message}`);
     checkHealth();
   } finally {

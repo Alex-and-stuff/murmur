@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import threading
 import time
+import traceback
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -150,11 +152,12 @@ def normalize_summary(payload: object) -> dict[str, object]:
     if not summary:
         raise ValueError("summary response is missing summary")
 
-    def strings(key: str) -> list[str]:
+    def strings(key: str, limit: int) -> list[str]:
         value = payload.get(key, [])
         if not isinstance(value, list):
             return []
-        return [str(item).strip() for item in value if str(item).strip()]
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items[:limit]
 
     action_items = []
     raw_actions = payload.get("action_items", [])
@@ -172,9 +175,9 @@ def normalize_summary(payload: object) -> dict[str, object]:
                 action_items.append({"task": str(item).strip(), "owner": None, "due": None})
     return {
         "summary": summary,
-        "key_points": strings("key_points"),
-        "decisions": strings("decisions"),
-        "action_items": action_items,
+        "key_points": strings("key_points", 6),
+        "decisions": strings("decisions", 6),
+        "action_items": action_items[:8],
     }
 
 
@@ -197,6 +200,9 @@ class MLXSummaryBackend:
                 "把尚未納入的會議發言整合進目前的紀要草稿，然後重寫整份紀要。"
                 "保留仍有效的事實；若發言補充或修正先前資訊，以較新的明確說法為準。"
                 "目前紀要只是可修改的草稿，不要沿用其中重複、瑣碎或描述整理過程的句子。"
+                "如果新發言只是替某個既有 key_point 補充例子、細節或後續發展，"
+                "直接改寫那一項讓它更完整，不要另外新增一條；"
+                "只有出現真正獨立的新主題時才新增 key_point，並視需要刪除已被新主題涵蓋的舊項目。"
                 f"\n\n目前紀要草稿 JSON：\n{json.dumps(previous_summary, ensure_ascii=False)}"
                 f"\n\n尚未納入的會議發言：\n{transcript}"
             )
@@ -207,9 +213,16 @@ class MLXSummaryBackend:
                 "role": "system",
                 "content": (
                     "你是會議紀錄助手。只根據逐字稿整理內容，不得補充未出現的事實。"
-                    "每次都要輸出一份可獨立閱讀的最新完整會議紀要，而不是更新日誌。"
-                    "不得在結果中提及「逐字稿」「新加入」「既有摘要」「上一批」「本次更新」"
-                    "或任何資料處理與生成過程。摘要使用二至四句；重點最多八項，決策最多六項，"
+                    "每次都要輸出一份可獨立閱讀的最新完整會議紀要，而不是更新日誌或時間軸記錄。"
+                    "\n\nkey_points 的每一項要對應一個獨立的討論主題或論點，而不是逐字稿裡的單一事件、"
+                    "動作或時間點。用一到兩句話講清楚這個主題在討論什麼、結論或洞見是什麼；"
+                    "如果逐字稿裡有多個例子、細節或延伸描述屬於同一個主題，把它們整合進同一項描述裡"
+                    "（例如用「例如…」帶出一個代表性例子），不要每個細節都各自成一條。"
+                    "避免逐句複述逐字稿或條列流水帳式的事件清單——例如同一個人做的一連串小動作"
+                    "（開了頻道、取了名字、上傳了頭像）不要拆成三條，應該合併成一條講清楚整體在做什麼、為什麼值得注意。"
+                    "\n\n不得在結果中提及「逐字稿」「新加入」「既有摘要」「上一批」「本次更新」"
+                    "或任何資料處理與生成過程。摘要（summary）用二至四句話點出整場討論的主軸與脈絡，"
+                    "不是逐項清單的複述；key_points 最多六項且彼此主題不重疊；決策最多六項；"
                     "待辦事項最多八項。合併語意相同或高度相關的內容，刪除重複、過時與瑣碎項目。"
                     "請輸出繁體中文 JSON，不要使用 Markdown。格式必須是："
                     '{"summary":"...","key_points":["..."],"decisions":["..."],'
@@ -224,21 +237,36 @@ class MLXSummaryBackend:
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        text = ""
+        last_error: Exception | None = None
         with self._lock:
-            response = self._generate(
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_tokens=1_024,
-                verbose=False,
-            )
-        text = str(response).strip()
-        if "</think>" in text:
-            text = text.split("</think>", 1)[1].strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end < start:
-            raise ValueError("summary model did not return JSON")
-        return normalize_summary(json.loads(text[start : end + 1]))
+            for attempt, max_tokens in enumerate((1_536, 3_072), start=1):
+                response = self._generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    verbose=False,
+                )
+                text = str(response).strip()
+                if "</think>" in text:
+                    text = text.split("</think>", 1)[1].strip()
+                start, end = text.find("{"), text.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        return normalize_summary(json.loads(text[start : end + 1]))
+                    except json.JSONDecodeError as exc:
+                        last_error = exc
+                else:
+                    last_error = ValueError("no JSON object found in model output")
+                print(
+                    f"[summary] attempt {attempt} at max_tokens={max_tokens} did not yield valid JSON "
+                    f"({last_error}); output tail: {text[-200:]!r}",
+                    file=sys.stderr,
+                )
+        raise ValueError(
+            f"summary model did not return JSON after {attempt} attempt(s): {last_error}"
+        )
 
 
 class FixtureSummaryBackend:
@@ -476,6 +504,13 @@ class MurmurHandler(SimpleHTTPRequestHandler):
             result["mode"] = "incremental" if previous_summary else "full"
             self._json(HTTPStatus.OK, result)
         except Exception as exc:
+            print(
+                f"[{self.log_date_time_string()}] /api/summarize failed "
+                f"(transcript_chars={len(transcript)}, has_previous_summary={previous_summary is not None}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
             self._json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "summary_failed", "detail": f"{type(exc).__name__}: {exc}"},
