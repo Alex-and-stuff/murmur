@@ -2,6 +2,111 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T114714Z-tune-vad-hangover-and-max-chunk-length-from-live-testing",
+      "created_at": "2026-09-15T11:47:14Z",
+      "title": "Tune VAD hangover and max chunk length from live testing",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "frontend",
+        "realtime",
+        "vad"
+      ],
+      "files": [
+        "dist/app.js"
+      ],
+      "branch": "main",
+      "commit": "6b56efd",
+      "path": "sessions/2026/09/20260915T114714Z-tune-vad-hangover-and-max-chunk-length-from-live-testing.md"
+    },
+    {
+      "id": "20260915T113725Z-add-youtube-link-testing-via-server-side-yt-dlp-download",
+      "created_at": "2026-09-15T11:37:25Z",
+      "title": "Add YouTube link testing via server-side yt-dlp download",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "backend",
+        "frontend",
+        "testing",
+        "youtube"
+      ],
+      "files": [
+        ".gitignore",
+        "README.md",
+        "backend/server.py",
+        "dist/app.js",
+        "dist/index.html",
+        "dist/styles.css",
+        "tests/test_server.py"
+      ],
+      "branch": "main",
+      "commit": "6b56efd",
+      "path": "sessions/2026/09/20260915T113725Z-add-youtube-link-testing-via-server-side-yt-dlp-download.md"
+    },
+    {
+      "id": "20260915T111922Z-add-client-side-vad-gating-for-realtime-asr-chunks",
+      "created_at": "2026-09-15T11:19:22Z",
+      "title": "Add client-side VAD gating for realtime ASR chunks",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "frontend",
+        "realtime",
+        "vad"
+      ],
+      "files": [
+        "dist/app.js"
+      ],
+      "branch": "main",
+      "commit": "6b56efd",
+      "path": "sessions/2026/09/20260915T111922Z-add-client-side-vad-gating-for-realtime-asr-chunks.md"
+    },
+    {
+      "id": "20260914T165732Z-add-mp3-and-audio-file-compatibility",
+      "created_at": "2026-09-14T16:57:32Z",
+      "title": "Add MP3 and audio-file compatibility",
+      "status": "completed",
+      "tags": [
+        "audio",
+        "frontend",
+        "mp3",
+        "realtime"
+      ],
+      "files": [
+        "README.md",
+        "dist/app.js",
+        "dist/index.html"
+      ],
+      "branch": "main",
+      "commit": "6b56efd",
+      "path": "sessions/2026/09/20260914T165732Z-add-mp3-and-audio-file-compatibility.md"
+    },
+    {
+      "id": "20260914T163900Z-implement-local-realtime-qwen-asr-inference",
+      "created_at": "2026-09-14T16:39:00Z",
+      "title": "Implement local realtime Qwen ASR inference",
+      "status": "completed",
+      "tags": [
+        "asr",
+        "backend",
+        "frontend",
+        "mlx",
+        "realtime"
+      ],
+      "files": [
+        "README.md",
+        "backend/server.py",
+        "dist/app.js",
+        "dist/index.html",
+        "dist/styles.css",
+        "tests/test_server.py"
+      ],
+      "branch": "main",
+      "commit": "6b56efd",
+      "path": "sessions/2026/09/20260914T163900Z-implement-local-realtime-qwen-asr-inference.md"
+    },
+    {
       "id": "20260914T162051Z-build-video-transcript-playback-prototype",
       "created_at": "2026-09-14T16:20:51Z",
       "title": "Build video transcript playback prototype",

@@ -1,27 +1,183 @@
-const cues = [
-  [0.0, 5.4, "來一分鐘，直接幫你整理好這次 Apple 發表會的重點。"],
-  [5.4, 11.5, "首先最重磅的就是 Apple 出的第一支折疊 iPhone，叫做 iPhone Duo。"],
-  [11.5, 17.2, "台灣是七萬四千九起跳，十月二十三號開賣。"],
-  [17.2, 23.5, "打開來有七點六寸的大螢幕，最有感的功能都是圍繞著這塊螢幕轉。"],
-  [23.5, 30.5, "用後面的主鏡頭幫別人拍照時，外面的螢幕可以同步顯示畫面。"],
-  [30.5, 36.6, "被拍的人可以自己看到構圖、調整姿勢，我個人覺得真的超實用。"],
-  [36.6, 42.6, "手機也會判斷大家什麼時候擺好姿勢、看著鏡頭，然後自己按下快門。"],
-  [42.6, 48.1, "但它背後只有兩個鏡頭，沒有獨立長焦，拍遠的東西不強。"],
-  [48.1, 54.1, "iOS 27 還讓 iPhone 第一次可以左右同時開兩個 App。"],
-  [54.1, 59.5, "它也支援 Apple Pencil，這是 iPhone 史上第一次可以用筆。"],
-  [59.5, 65.4, "再來多數人可能還是會買 iPhone 18 Pro 或 Pro Max。"],
-  [65.4, 70.9, "台灣四萬四千九起跳，九月十八號就到貨，這一代升級幾乎都在相機。"],
-  [70.9, 77.2, "它加入可變光圈，光線暗時自動開到最大，讓更多光進來。"],
-  [77.2, 83.1, "拍多人合照時光圈會縮小，讓前排和後排的人可以同時清楚。"],
-  [83.1, 88.2, "顏色有黑色、銀色，加上冰川藍跟勃艮第紅兩個新色。"],
-  [88.2, 92.54, "那你會選哪一個呢？可以留言跟我說，我自己還在糾結到不行。"]
-];
+const TARGET_SAMPLE_RATE = 16000;
+const MIN_CHUNK_SECONDS = 1;
+const MAX_CHUNK_SECONDS = 16;
+const SPEECH_RMS_THRESHOLD = 0.012;
+const SILENCE_HANGOVER_SECONDS = 0.35;
+const PRE_ROLL_FRAMES = 2;
 
-const ids = ["uploadButton","fileInput","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave"];
+const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
-let renderedCount = 0;
 let uploadUrl = null;
+let segments = [];
+let serverStatus = "loading";
+let sessionGeneration = 0;
+let pendingRequests = 0;
+let healthTimer = null;
+let inferenceRange = null;
+
+class RealtimeCapture {
+  constructor() {
+    this.context = null;
+    this.nodes = new Map();
+    this.samples = [];
+    this.sampleCount = 0;
+    this.captureStart = null;
+    this.hasSpeech = false;
+    this.silenceSeconds = 0;
+    this.preRoll = [];
+    this.requestChain = Promise.resolve();
+  }
+
+  async attach(media) {
+    if (!this.context) this.context = new AudioContext({ latencyHint: "interactive" });
+    await this.context.resume();
+    if (this.nodes.has(media)) return;
+    const source = this.context.createMediaElementSource(media);
+    const processor = this.context.createScriptProcessor(4096, 2, 1);
+    const silent = this.context.createGain();
+    silent.gain.value = 0;
+    source.connect(this.context.destination);
+    source.connect(processor);
+    processor.connect(silent);
+    silent.connect(this.context.destination);
+    processor.onaudioprocess = event => this.receive(media, event.inputBuffer);
+    this.nodes.set(media, { source, processor, silent });
+  }
+
+  receive(media, input) {
+    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error") return;
+    const mono = new Float32Array(input.length);
+    for (let channel = 0; channel < input.numberOfChannels; channel++) {
+      const data = input.getChannelData(channel);
+      for (let i = 0; i < data.length; i++) mono[i] += data[i] / input.numberOfChannels;
+    }
+    const resampled = downsample(mono, this.context.sampleRate, TARGET_SAMPLE_RATE);
+    const frameSeconds = resampled.length / TARGET_SAMPLE_RATE;
+    const speaking = computeRMS(resampled) >= SPEECH_RMS_THRESHOLD;
+
+    if (!speaking && !this.hasSpeech) {
+      this.preRoll.push(resampled);
+      if (this.preRoll.length > PRE_ROLL_FRAMES) this.preRoll.shift();
+      renderDraft(0);
+      return;
+    }
+
+    if (speaking) {
+      this.silenceSeconds = 0;
+      if (!this.hasSpeech) {
+        const preRollSeconds = this.preRoll.reduce((sum, chunk) => sum + chunk.length, 0) / TARGET_SAMPLE_RATE;
+        this.captureStart = Math.max(0, media.currentTime - frameSeconds - preRollSeconds);
+        for (const chunk of this.preRoll) { this.samples.push(chunk); this.sampleCount += chunk.length; }
+        this.preRoll = [];
+        this.hasSpeech = true;
+      }
+    } else {
+      this.silenceSeconds += frameSeconds;
+    }
+
+    this.samples.push(resampled);
+    this.sampleCount += resampled.length;
+    renderDraft(this.sampleCount / TARGET_SAMPLE_RATE);
+
+    const bufferedSeconds = this.sampleCount / TARGET_SAMPLE_RATE;
+    if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= MAX_CHUNK_SECONDS) {
+      this.flush();
+    }
+  }
+
+  flush() {
+    if (!this.sampleCount) return;
+    if (this.sampleCount < MIN_CHUNK_SECONDS * TARGET_SAMPLE_RATE) {
+      this.discard();
+      return;
+    }
+    const pcm = concatSamples(this.samples, this.sampleCount);
+    const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - this.sampleCount / TARGET_SAMPLE_RATE);
+    const end = start + this.sampleCount / TARGET_SAMPLE_RATE;
+    const generation = sessionGeneration;
+    this.samples = [];
+    this.sampleCount = 0;
+    this.captureStart = null;
+    this.hasSpeech = false;
+    this.silenceSeconds = 0;
+    this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation));
+  }
+
+  discard() {
+    this.samples = [];
+    this.sampleCount = 0;
+    this.captureStart = null;
+    this.hasSpeech = false;
+    this.silenceSeconds = 0;
+    this.preRoll = [];
+    renderDraft(0);
+  }
+}
+
+const capturer = new RealtimeCapture();
+
+function downsample(input, sourceRate, targetRate) {
+  if (sourceRate === targetRate) return input.slice();
+  const ratio = sourceRate / targetRate;
+  const output = new Float32Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < output.length; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = start; j < end; j++) sum += input[j];
+    output[i] = sum / Math.max(1, end - start);
+  }
+  return output;
+}
+
+function computeRMS(samples) {
+  let sumSquares = 0;
+  for (let i = 0; i < samples.length; i++) sumSquares += samples[i] * samples[i];
+  return Math.sqrt(sumSquares / samples.length);
+}
+
+function concatSamples(chunks, length) {
+  const output = new Float32Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
+  return output;
+}
+
+async function transcribeChunk(pcm, start, end, generation) {
+  pendingRequests++;
+  inferenceRange = { start, end };
+  renderDraft(0, start, end);
+  try {
+    const response = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Audio-Start": String(start),
+        "X-Audio-End": String(end),
+        "X-Language": "Chinese"
+      },
+      body: pcm
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "辨識失敗");
+    if (generation !== sessionGeneration) return;
+    const text = String(payload.text || "").trim();
+    if (text) {
+      segments.push({ start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
+      segments.sort((a, b) => a.start - b.start);
+      renderCompleted();
+    }
+  } catch (error) {
+    showToast(`逐字稿暫時無法產生：${error.message}`);
+    checkHealth();
+  } finally {
+    pendingRequests--;
+    inferenceRange = null;
+    if (!pendingRequests) renderDraft(0);
+    syncUI();
+  }
+}
 
 function formatTime(value) {
   if (!Number.isFinite(value)) return "00:00";
@@ -36,84 +192,204 @@ function setupWave() {
 
 function syncUI() {
   const current = activeMedia.currentTime || 0;
-  const total = activeMedia.duration || cues[cues.length - 1][1];
+  const total = activeMedia.duration || 92.54;
   const ratio = Math.min(1, current / total);
   el.currentTime.textContent = formatTime(current);
   el.duration.textContent = formatTime(total);
   el.timeline.value = ratio * 100;
   el.timeline.style.setProperty("--progress", `${ratio * 100}%`);
-  const completed = cues.filter(cue => current >= cue[1]).length;
-  if (completed !== renderedCount) renderCompleted(completed);
-  renderDraft(current, completed);
-  el.lineCount.textContent = `${completed} / ${cues.length} 段`;
-  el.progressBar.style.width = `${(completed / cues.length) * 100}%`;
-  el.progressText.textContent = completed ? `已完成 ${Math.round((completed / cues.length) * 100)}%` : activeMedia.paused ? "尚未開始" : "正在建立逐字稿";
+  el.lineCount.textContent = `${segments.length} 段`;
+  el.progressBar.style.width = `${ratio * 100}%`;
+  const latest = segments.at(-1);
+  el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
   el.demoVisual.classList.toggle("playing", activeMedia === el.demoAudio && !activeMedia.paused);
 }
 
-function renderCompleted(count) {
-  renderedCount = count;
-  if (!count) {
-    el.transcriptStream.innerHTML = `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，看看逐字稿如何產生</strong><p>完成的句子會保留下來，目前辨識中的內容則會即時更新。</p></div>`;
+function renderCompleted() {
+  if (!segments.length) {
+    el.transcriptStream.innerHTML = `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
     return;
   }
-  el.transcriptStream.innerHTML = cues.slice(0, count).map((cue, index) => `<article class="transcript-line${index === count - 1 ? " latest" : ""}" data-start="${cue[0]}"><button type="button" aria-label="跳到 ${formatTime(cue[0])}">${formatTime(cue[0])}</button><p>${escapeHTML(cue[2])}</p></article>`).join("");
-  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => { activeMedia.currentTime = Number(row.dataset.start); syncUI(); }));
+  el.transcriptStream.innerHTML = segments.map((segment, index) => `<article class="transcript-line${index === segments.length - 1 ? " latest" : ""}" data-start="${segment.start}"><button type="button" aria-label="跳到 ${formatTime(segment.start)}">${formatTime(segment.start)}</button><p>${escapeHTML(segment.text)}</p></article>`).join("");
+  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); }));
   requestAnimationFrame(() => { el.transcriptStream.scrollTop = el.transcriptStream.scrollHeight; });
 }
 
-function renderDraft(current, completed) {
-  const cue = cues.find(item => current >= item[0] && current < item[1]);
-  if (!cue || activeMedia.paused || completed >= cues.length) { el.liveDraft.hidden = true; return; }
-  const progress = Math.max(0.06, (current - cue[0]) / (cue[1] - cue[0]));
-  const characters = Math.max(1, Math.ceil(cue[2].length * progress));
+function renderDraft(bufferedSeconds = 0, start = null, end = null) {
+  if (pendingRequests) {
+    const range = inferenceRange || { start, end };
+    el.liveDraft.hidden = false;
+    el.draftTime.textContent = formatTime(range.start ?? activeMedia.currentTime);
+    el.draftText.innerHTML = `正在辨識 ${formatTime(range.start)}–${formatTime(range.end)} 的聲音<i class="caret"></i>`;
+    return;
+  }
+  if (activeMedia.paused || !bufferedSeconds) { el.liveDraft.hidden = true; return; }
   el.liveDraft.hidden = false;
-  el.draftTime.textContent = formatTime(cue[0]);
-  el.draftText.innerHTML = `${escapeHTML(cue[2].slice(0, characters))}<i class="caret"></i>`;
+  el.draftTime.textContent = formatTime(Math.max(0, activeMedia.currentTime - bufferedSeconds));
+  el.draftText.innerHTML = `正在聆聽，已收集 ${bufferedSeconds.toFixed(1)} 秒<i class="caret"></i>`;
 }
 
-function togglePlay() { if (activeMedia.paused) activeMedia.play().catch(() => showToast("無法播放這個檔案")); else activeMedia.pause(); }
+async function togglePlay() {
+  if (!activeMedia.paused) { activeMedia.pause(); return; }
+  if (serverStatus !== "ready") {
+    showToast(serverStatus === "loading" ? "模型仍在載入，請稍候" : "請先啟動本機 inference service");
+    await checkHealth();
+    return;
+  }
+  try {
+    await capturer.attach(activeMedia);
+    await activeMedia.play();
+  } catch (_) { showToast("無法播放或擷取這個檔案的聲音"); }
+}
+
 function updatePlaybackState() {
   const playing = !activeMedia.paused;
   el.playIcon.textContent = playing ? "Ⅱ" : "▶";
   el.playButton.setAttribute("aria-label", playing ? "暫停" : "播放");
-  el.statusPill.classList.toggle("active", playing);
-  el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "等待播放";
+  el.statusPill.classList.toggle("active", playing && serverStatus === "ready");
+  if (serverStatus === "loading") el.statusText.textContent = "模型載入中";
+  else if (serverStatus === "error") el.statusText.textContent = "後端未連線";
+  else el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "可以開始";
+  if (!playing) capturer.flush();
   syncUI();
 }
+
 function bindMedia(media) {
   ["timeupdate", "loadedmetadata", "durationchange"].forEach(name => media.addEventListener(name, syncUI));
   ["play", "pause", "ended"].forEach(name => media.addEventListener(name, updatePlaybackState));
+  media.addEventListener("seeking", () => capturer.discard());
 }
-function loadVideo(file) {
+
+function resetTranscript() {
+  sessionGeneration++;
+  segments = [];
+  capturer.discard();
+  renderCompleted();
+  syncUI();
+}
+
+function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toastMessage }) {
   activeMedia.pause();
-  if (uploadUrl) URL.revokeObjectURL(uploadUrl);
-  uploadUrl = URL.createObjectURL(file); el.video.src = uploadUrl; activeMedia = el.video;
-  el.video.classList.add("visible"); el.demoVisual.hidden = true;
-  el.videoBadge.innerHTML = "<span></span> 本機影片";
-  el.mediaTitle.textContent = file.name; el.mediaMeta.textContent = `${formatBytes(file.size)} · 使用測試逐字稿`;
-  renderedCount = -1; renderCompleted(0); updatePlaybackState();
-  showToast("影片已載入，不會上傳到伺服器");
+  if (isAudio) {
+    el.video.pause();
+    el.video.classList.remove("visible");
+    el.demoAudio.src = sourceUrl;
+    activeMedia = el.demoAudio;
+    el.demoVisual.hidden = false;
+  } else {
+    el.video.src = sourceUrl;
+    activeMedia = el.video;
+    el.video.classList.add("visible");
+    el.demoVisual.hidden = true;
+  }
+  el.videoBadge.innerHTML = `<span></span> ${badgeText}`;
+  el.mediaTitle.textContent = label;
+  el.mediaMeta.textContent = meta;
+  resetTranscript();
+  updatePlaybackState();
+  showToast(toastMessage);
 }
-function restart() { activeMedia.pause(); activeMedia.currentTime = 0; renderedCount = -1; renderCompleted(0); updatePlaybackState(); }
+
+function loadMedia(file) {
+  if (uploadUrl) URL.revokeObjectURL(uploadUrl);
+  uploadUrl = URL.createObjectURL(file);
+  const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name);
+  activateMediaSource(uploadUrl, {
+    isAudio,
+    label: file.name,
+    meta: `${formatBytes(file.size)} · realtime inference`,
+    badgeText: isAudio ? "本機音訊" : "本機影片",
+    toastMessage: `${isAudio ? "音訊" : "影片"}已載入；播放中的聲音會送往本機模型`,
+  });
+}
+
+async function loadYoutubeMedia(url) {
+  el.youtubeUrl.disabled = true;
+  el.youtubeSubmit.disabled = true;
+  const originalLabel = el.youtubeSubmit.textContent;
+  el.youtubeSubmit.textContent = "下載中…";
+  showToast("正在從 YouTube 下載音訊，請稍候");
+  try {
+    const response = await fetch("/api/fetch-media", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "下載失敗");
+    if (uploadUrl) { URL.revokeObjectURL(uploadUrl); uploadUrl = null; }
+    activateMediaSource(payload.url, {
+      isAudio: true,
+      label: payload.title || "YouTube 音訊",
+      meta: "YouTube · realtime inference",
+      badgeText: "YouTube 音訊",
+      toastMessage: "YouTube 音訊已載入；播放中的聲音會送往本機模型",
+    });
+    el.youtubeUrl.value = "";
+  } catch (error) {
+    showToast(`YouTube 音訊載入失敗：${error.message}`);
+  } finally {
+    el.youtubeUrl.disabled = false;
+    el.youtubeSubmit.disabled = false;
+    el.youtubeSubmit.textContent = originalLabel;
+  }
+}
+
+function restart() {
+  activeMedia.pause();
+  activeMedia.currentTime = 0;
+  resetTranscript();
+  updatePlaybackState();
+}
+
 async function copyTranscript() {
-  const count = cues.filter(cue => activeMedia.currentTime >= cue[1]).length;
-  const text = cues.slice(0, count).map(cue => `[${formatTime(cue[0])}] ${cue[2]}`).join("\n");
+  const text = segments.map(segment => `[${formatTime(segment.start)}] ${segment.text}`).join("\n");
   if (!text) return showToast("播放後才有逐字稿可以複製");
   try { await navigator.clipboard.writeText(text); showToast("已複製目前的逐字稿"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
 }
+
+async function checkHealth() {
+  try {
+    const response = await fetch("/api/health", { cache: "no-store" });
+    if (!response.ok) throw new Error();
+    const health = await response.json();
+    serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
+    el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
+  } catch (_) {
+    serverStatus = "error";
+    el.runtimeLabel.textContent = "未連接本機 inference service";
+  }
+  updatePlaybackState();
+  clearTimeout(healthTimer);
+  if (serverStatus !== "ready") healthTimer = setTimeout(checkHealth, 2000);
+  return serverStatus;
+}
+
 function formatBytes(bytes) { return bytes > 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`; }
 function escapeHTML(text) { const node = document.createElement("span"); node.textContent = text; return node.innerHTML; }
-function showToast(message) { el.toast.textContent = message; el.toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => el.toast.classList.remove("show"), 2200); }
+function showToast(message) { el.toast.textContent = message; el.toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => el.toast.classList.remove("show"), 3000); }
 
 el.playButton.addEventListener("click", togglePlay);
 el.demoVisual.addEventListener("click", togglePlay);
-el.timeline.addEventListener("input", () => { const total = activeMedia.duration || cues[cues.length - 1][1]; activeMedia.currentTime = (Number(el.timeline.value) / 100) * total; syncUI(); });
+el.timeline.addEventListener("input", () => { capturer.discard(); const total = activeMedia.duration || 92.54; activeMedia.currentTime = (Number(el.timeline.value) / 100) * total; syncUI(); });
 el.soundButton.addEventListener("click", () => { activeMedia.muted = !activeMedia.muted; el.soundButton.textContent = activeMedia.muted ? "×" : "⌁"; el.soundButton.classList.toggle("muted", activeMedia.muted); });
 el.restartButton.addEventListener("click", restart);
 el.uploadButton.addEventListener("click", () => el.fileInput.click());
-el.fileInput.addEventListener("change", event => event.target.files[0] && loadVideo(event.target.files[0]));
+el.fileInput.addEventListener("change", event => {
+  if (event.target.files[0]) loadMedia(event.target.files[0]);
+  event.target.value = "";
+});
 el.copyButton.addEventListener("click", copyTranscript);
+el.youtubeForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const url = el.youtubeUrl.value.trim();
+  if (!url) return showToast("請先貼上 YouTube 連結");
+  loadYoutubeMedia(url);
+});
 document.addEventListener("keydown", event => { if (event.code === "Space" && !/INPUT|BUTTON/.test(document.activeElement.tagName)) { event.preventDefault(); togglePlay(); } });
 
-bindMedia(el.demoAudio); bindMedia(el.video); setupWave(); syncUI();
+bindMedia(el.demoAudio);
+bindMedia(el.video);
+setupWave();
+renderCompleted();
+checkHealth();

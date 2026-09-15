@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dev Notes"
+  short_description: "Record and retrieve repository development sessions"
+  default_prompt: "Record or retrieve development history from ./dev_notes."

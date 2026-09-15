@@ -15,14 +15,20 @@
   <header class="topbar">
     <a class="brand" href="#"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Murmur</a>
     <span class="lab-label">TRANSCRIPT LAB <b>BETA</b></span>
-    <button class="ghost-button" id="uploadButton" type="button"><span>＋</span> 換一支影片</button>
-    <input id="fileInput" type="file" accept="video/*" hidden />
+    <div class="topbar-actions">
+      <form class="youtube-form" id="youtubeForm">
+        <input id="youtubeUrl" type="url" inputmode="url" placeholder="貼上 YouTube 連結" aria-label="YouTube 連結" />
+        <button type="submit" id="youtubeSubmit">載入</button>
+      </form>
+      <button class="ghost-button" id="uploadButton" type="button"><span>＋</span> 換一個檔案</button>
+      <input id="fileInput" type="file" accept="video/*,audio/*,.mp3" hidden />
+    </div>
   </header>
 
   <main>
     <section class="intro">
       <div><p class="eyebrow">VIDEO TRANSCRIPTION TEST</p><h1>一邊看，一邊確認<br />每一句話。</h1></div>
-      <p class="intro-copy">播放影片，逐字稿會跟著語音即時長出來。你也可以拖曳時間軸，快速檢查文字與畫面是否對得上。</p>
+      <p class="intro-copy">播放影片或音訊，逐字稿會跟著語音即時長出來。你也可以拖曳時間軸，快速檢查文字與內容是否對得上。</p>
     </section>
 
     <section class="workspace">
@@ -56,9 +62,9 @@
       <aside class="transcript-panel">
         <div class="panel-heading">
           <div><p class="eyebrow">LIVE OUTPUT</p><h2>逐字稿</h2></div>
-          <div class="status-pill" id="statusPill"><span></span><b id="statusText">等待播放</b></div>
+          <div class="status-pill" id="statusPill"><span></span><b id="statusText">模型載入中</b></div>
         </div>
-        <div class="progress-row"><span id="progressText">尚未開始</span><span id="lineCount">0 / 16 段</span></div>
+        <div class="progress-row"><span id="progressText">尚未開始</span><span id="lineCount">0 段</span></div>
         <div class="progress-track"><i id="progressBar"></i></div>
         <div class="transcript-stream" id="transcriptStream" aria-live="polite">
           <div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，看看逐字稿如何產生</strong><p>完成的句子會保留下來，目前辨識中的內容則會即時更新。</p></div>
@@ -66,11 +72,11 @@
         <div class="live-draft" id="liveDraft" hidden>
           <div class="draft-meta"><span><i></i> 正在辨識</span><time id="draftTime">00:00</time></div><p id="draftText"></p>
         </div>
-        <footer class="panel-footer"><span><i></i> 本機測試模式</span><button id="copyButton" type="button">複製逐字稿</button></footer>
+        <footer class="panel-footer"><span><i></i> <b id="runtimeLabel">正在連接 inference service</b></span><button id="copyButton" type="button">複製逐字稿</button></footer>
       </aside>
     </section>
 
-    <section class="privacy-note"><span>⌂</span><p><strong>影片留在你的裝置上</strong><br />上傳的影片只會在這個瀏覽器分頁播放，不會送到伺服器。這個版本使用預先產生的測試逐字稿來示範互動。</p></section>
+    <section class="privacy-note"><span>⌂</span><p><strong>影音檔留在你的裝置上</strong><br />來源檔只在瀏覽器播放；系統會將播放中的短音訊片段送到這台電腦上的 Qwen3-ASR，逐段產生真實逐字稿。</p></section>
   </main>
   <div class="toast" id="toast" role="status"></div>
   <script src="app.js"></script>

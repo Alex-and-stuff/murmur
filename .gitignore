@@ -1,0 +1,16 @@
+# Local model links and weights
+models/
+data/
+
+# Downloaded YouTube test media
+dist/uploads/
+
+# Local Claude Code config
+.claude/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
