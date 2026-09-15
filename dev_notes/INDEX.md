@@ -8,6 +8,7 @@ Generated index. Session files are the source of truth.
 
 ## Completed
 
+- [Add online summary control and inference context diagnostics](sessions/2026/09/20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics.md) — 2026-09-15T14:35:28Z — api, debug, frontend, summary
 - [Prevent incremental summary changelog drift](sessions/2026/09/20260915T125145Z-prevent-incremental-summary-changelog-drift.md) — 2026-09-15T12:51:45Z — prompt, quality, realtime, summary
 - [Implement real-time rolling meeting summaries](sessions/2026/09/20260915T123707Z-implement-real-time-rolling-meeting-summaries.md) — 2026-09-15T12:37:07Z — api, frontend, mlx, realtime, summary
 - [Complete Apple MLX summary POC startup verification](sessions/2026/09/20260915T122756Z-complete-apple-mlx-summary-poc-startup-verification.md) — 2026-09-15T12:27:56Z — asr, mlx, poc, startup, summary

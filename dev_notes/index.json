@@ -2,6 +2,29 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics",
+      "created_at": "2026-09-15T14:35:28Z",
+      "title": "Add online summary control and inference context diagnostics",
+      "status": "completed",
+      "tags": [
+        "api",
+        "debug",
+        "frontend",
+        "summary"
+      ],
+      "files": [
+        "README.md",
+        "backend/server.py",
+        "dist/app.js",
+        "dist/index.html",
+        "dist/styles.css",
+        "tests/test_server.py"
+      ],
+      "branch": "main",
+      "commit": "5ea4950",
+      "path": "sessions/2026/09/20260915T143528Z-add-online-summary-control-and-inference-context-diagnostics.md"
+    },
+    {
       "id": "20260915T125145Z-prevent-incremental-summary-changelog-drift",
       "created_at": "2026-09-15T12:51:45Z",
       "title": "Prevent incremental summary changelog drift",

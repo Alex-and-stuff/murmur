@@ -11,7 +11,10 @@ so the summary rolls forward without repeatedly sending the full meeting transcr
 manual full refresh remains available. The prompt rewrites the result as standalone notes,
 deduplicates related points, and forbids update-log phrases such as “new transcript.” The
 browser also performs a full rebase after every six additional segments while the complete
-transcript remains within the model's safe context budget.
+transcript remains within the model's safe context budget. The UI can pause automatic
+online summary updates without disabling manual refreshes, and its inference debug panel
+lists every ASR audio context and summary prompt context for the current media session.
+Audio-only sources use the compact player without the old sample-video visual.
 
 ## Run locally on Apple Silicon
 
@@ -39,7 +42,9 @@ MURMUR_SUMMARY_MODEL=Qwen/Qwen3-8B-MLX-4bit \
 The chunk endpoint accepts mono little-endian Float32 PCM at 16 kHz. `GET
 /api/health` reports both model states, `POST /api/transcribe` runs one audio chunk,
 and `POST /api/summarize` accepts transcript segments plus an optional `previous_summary`
-for incremental updates. The first normal startup downloads the configured MLX summary
+for incremental updates. Responses include context measurements used by the debug UI:
+audio samples for ASR and prompt tokens plus input characters/segments for summaries.
+The first normal startup downloads the configured MLX summary
 weights into the Hugging Face cache.
 
 ## Test against a YouTube video

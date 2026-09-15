@@ -237,6 +237,10 @@ class MLXSummaryBackend:
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        try:
+            context_tokens = len(self.tokenizer.encode(prompt))
+        except (AttributeError, TypeError, ValueError):
+            context_tokens = None
         text = ""
         last_error: Exception | None = None
         with self._lock:
@@ -254,7 +258,9 @@ class MLXSummaryBackend:
                 start, end = text.find("{"), text.rfind("}")
                 if start >= 0 and end > start:
                     try:
-                        return normalize_summary(json.loads(text[start : end + 1]))
+                        result = normalize_summary(json.loads(text[start : end + 1]))
+                        result["context_tokens"] = context_tokens
+                        return result
                     except json.JSONDecodeError as exc:
                         last_error = exc
                 else:
@@ -443,6 +449,7 @@ class MurmurHandler(SimpleHTTPRequestHandler):
                     "start": round(start, 3),
                     "end": round(end, 3),
                     "audio_seconds": round(len(samples) / SAMPLE_RATE, 3),
+                    "context_samples": len(samples),
                     "inference_seconds": round(time.monotonic() - began, 3),
                 },
             )
@@ -502,6 +509,10 @@ class MurmurHandler(SimpleHTTPRequestHandler):
             result = self.summary_state.backend.summarize(transcript, previous_summary)
             result["inference_seconds"] = round(time.monotonic() - began, 3)
             result["mode"] = "incremental" if previous_summary else "full"
+            result["input_chars"] = len(transcript) + (
+                len(json.dumps(previous_summary, ensure_ascii=False)) if previous_summary else 0
+            )
+            result["input_segments"] = len(lines)
             self._json(HTTPStatus.OK, result)
         except Exception as exc:
             print(

@@ -15,6 +15,9 @@ class SummaryPromptTest(unittest.TestCase):
                 self.messages = messages
                 return "prompt"
 
+            def encode(self, prompt):
+                return [1, 2, 3]
+
         backend = MLXSummaryBackend.__new__(MLXSummaryBackend)
         backend.model = object()
         backend.tokenizer = FakeTokenizer()
@@ -29,7 +32,7 @@ class SummaryPromptTest(unittest.TestCase):
             ensure_ascii=False,
         )
 
-        backend.summarize(
+        result = backend.summarize(
             "[1.0s–2.0s] 後續討論",
             {"summary": "先前摘要", "key_points": [], "decisions": [], "action_items": []},
         )
@@ -40,6 +43,7 @@ class SummaryPromptTest(unittest.TestCase):
         self.assertIn("合併語意相同", system_prompt)
         self.assertIn("不得在結果中提及", system_prompt)
         self.assertIn("重寫整份紀要", task_prompt)
+        self.assertEqual(result["context_tokens"], 3)
 
 
 class ServerSmokeTest(unittest.TestCase):
@@ -90,6 +94,7 @@ class ServerSmokeTest(unittest.TestCase):
         self.assertEqual(payload["text"], "測試音訊 1.0 秒")
         self.assertEqual(payload["start"], 3.25)
         self.assertEqual(payload["end"], 4.25)
+        self.assertEqual(payload["context_samples"], SAMPLE_RATE)
 
     def test_short_chunk_is_rejected(self):
         request = urllib.request.Request(
@@ -117,6 +122,8 @@ class ServerSmokeTest(unittest.TestCase):
         self.assertEqual(payload["key_points"], ["摘要 API 已收到逐字稿"])
         self.assertEqual(payload["action_items"], [])
         self.assertEqual(payload["mode"], "full")
+        self.assertEqual(payload["input_segments"], 1)
+        self.assertGreater(payload["input_chars"], 0)
 
     def test_previous_summary_enables_incremental_update(self):
         request = urllib.request.Request(

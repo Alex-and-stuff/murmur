@@ -11,7 +11,7 @@ const FULL_SUMMARY_REBASE_MAX_CHARS = 20000;
 const SUMMARY_BACKLOG_SAFETY_FAILURES = 2;
 const SUMMARY_BACKLOG_KEEP_SEGMENTS = 15;
 
-const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton"];
+const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
 let uploadUrl = null;
@@ -20,6 +20,7 @@ let serverStatus = "loading";
 let summaryStatus = "loading";
 let summaryResult = null;
 let summaryPending = false;
+let onlineSummaryEnabled = true;
 let summaryTimer = null;
 let summaryRequestNewSegments = 0;
 let coveredSegmentIds = new Set();
@@ -30,6 +31,7 @@ let sessionGeneration = 0;
 let pendingRequests = 0;
 let healthTimer = null;
 let inferenceRange = null;
+let inferenceEvents = [];
 
 class RealtimeCapture {
   constructor() {
@@ -177,6 +179,12 @@ async function transcribeChunk(pcm, start, end, generation) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || payload.error || "辨識失敗");
     if (generation !== sessionGeneration) return;
+    addInferenceEvent({
+      type: "ASR",
+      context: `${Number(payload.audio_seconds || 0).toFixed(1)} 秒`,
+      detail: `${Number(payload.context_samples || pcm.length).toLocaleString()} samples`,
+      latency: payload.inference_seconds,
+    });
     const text = String(payload.text || "").trim();
     if (text) {
       segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
@@ -203,10 +211,6 @@ function formatTime(value) {
   return `${minutes}:${seconds}`;
 }
 
-function setupWave() {
-  el.visualWave.innerHTML = Array.from({ length: 44 }, (_, index) => `<i style="--h:${18 + Math.sin(index * .72) * 12 + Math.cos(index * .27) * 8}px"></i>`).join("");
-}
-
 function syncUI() {
   const current = activeMedia.currentTime || 0;
   const total = activeMedia.duration || 92.54;
@@ -219,9 +223,10 @@ function syncUI() {
   el.progressBar.style.width = `${ratio * 100}%`;
   const latest = segments.at(-1);
   el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
-  el.demoVisual.classList.toggle("playing", activeMedia === el.demoAudio && !activeMedia.paused);
   el.summaryButton.disabled = summaryPending || summaryStatus !== "ready" || !segments.length;
   el.summaryButton.textContent = summaryPending ? "更新中…" : summaryResult ? "立即重整" : "立即產生";
+  el.onlineSummaryToggle.setAttribute("aria-checked", String(onlineSummaryEnabled));
+  el.onlineSummaryToggle.classList.toggle("enabled", onlineSummaryEnabled);
   el.copySummaryButton.disabled = !summaryResult;
 }
 
@@ -288,11 +293,13 @@ function resetTranscript() {
   summaryConsecutiveFailures = 0;
   nextSegmentId = 1;
   lastFullSummarySegmentCount = 0;
+  inferenceEvents = [];
   clearTimeout(summaryTimer);
   summaryTimer = null;
   capturer.discard();
   renderCompleted();
   renderSummary();
+  renderInferenceEvents();
   syncUI();
 }
 
@@ -301,14 +308,16 @@ function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toast
   if (isAudio) {
     el.video.pause();
     el.video.classList.remove("visible");
+    el.videoCard.hidden = true;
+    el.mediaColumn.classList.add("audio-only");
     el.demoAudio.src = sourceUrl;
     activeMedia = el.demoAudio;
-    el.demoVisual.hidden = false;
   } else {
     el.video.src = sourceUrl;
     activeMedia = el.video;
     el.video.classList.add("visible");
-    el.demoVisual.hidden = true;
+    el.videoCard.hidden = false;
+    el.mediaColumn.classList.remove("audio-only");
   }
   el.videoBadge.innerHTML = `<span></span> ${badgeText}`;
   el.mediaTitle.textContent = label;
@@ -379,10 +388,10 @@ async function copyTranscript() {
 function renderSummary() {
   if (!summaryResult) {
     const waiting = segments.length && segments.length < INITIAL_SUMMARY_SEGMENTS;
-    const title = summaryPending ? "正在建立第一版摘要…" : waiting ? "再多一段就開始整理" : "摘要會隨逐字稿出現在這裡";
-    const detail = summaryPending ? `正在整合前 ${summaryRequestNewSegments} 段穩定逐字稿。` : waiting ? "累積足夠上下文後會自動開始。" : "每當新段落完成，系統會在背景滾動更新會議重點。";
+    const title = summaryPending ? "正在建立第一版摘要…" : !onlineSummaryEnabled ? "Online summary 已關閉" : waiting ? "再多一段就開始整理" : "摘要會隨逐字稿出現在這裡";
+    const detail = summaryPending ? `正在整合前 ${summaryRequestNewSegments} 段穩定逐字稿。` : !onlineSummaryEnabled ? "仍可使用「立即產生」手動建立摘要。" : waiting ? "累積足夠上下文後會自動開始。" : "每當新段落完成，系統會在背景滾動更新會議重點。";
     el.summaryContent.innerHTML = `<div class="summary-empty"><strong>${title}</strong><p>${detail}</p></div>`;
-    el.summaryMeta.textContent = summaryPending ? "Real-time 滾動摘要更新中" : "自動追蹤穩定的逐字稿段落。";
+    el.summaryMeta.textContent = summaryPending ? "Real-time 滾動摘要更新中" : onlineSummaryEnabled ? "自動追蹤穩定的逐字稿段落。" : "自動更新已暫停。";
     syncUI();
     return;
   }
@@ -393,7 +402,9 @@ function renderSummary() {
   });
   el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>摘要</h3><p>${escapeHTML(summaryResult.summary)}</p></div>${list("重點", summaryResult.key_points)}</div><div>${list("決策", summaryResult.decisions)}${list("待辦事項", actions)}</div></div>`;
   const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id)).length;
-  el.summaryMeta.textContent = summaryPending
+  el.summaryMeta.textContent = !onlineSummaryEnabled && !summaryPending
+    ? `Online summary 已關閉 · 已涵蓋 ${coveredSegmentIds.size} 段`
+    : summaryPending
     ? `正在整合 ${summaryRequestNewSegments} 段新逐字稿…`
     : uncovered
       ? `已涵蓋 ${coveredSegmentIds.size} 段 · ${uncovered} 段等待更新`
@@ -414,7 +425,7 @@ function summaryForRequest() {
 function scheduleRollingSummary({ immediate = false } = {}) {
   clearTimeout(summaryTimer);
   summaryTimer = null;
-  if (summaryStatus !== "ready" || summaryPending || !segments.length) return;
+  if (!onlineSummaryEnabled || summaryStatus !== "ready" || summaryPending || !segments.length) return;
   const uncovered = segments.filter(segment => !coveredSegmentIds.has(segment.id));
   const required = summaryResult ? 1 : INITIAL_SUMMARY_SEGMENTS;
   if (uncovered.length < required) return;
@@ -465,6 +476,12 @@ async function generateSummary(forceFull = false) {
     if (!response.ok) throw new Error(payload.detail || payload.error || "摘要失敗");
     if (generation !== sessionGeneration) return;
     summaryResult = payload;
+    addInferenceEvent({
+      type: "SUMMARY",
+      context: Number.isFinite(payload.context_tokens) ? `${payload.context_tokens.toLocaleString()} tokens` : `${Number(payload.input_chars || 0).toLocaleString()} 字元`,
+      detail: `${payload.input_segments || requestSegments.length} 段 · ${payload.mode === "incremental" ? "incremental" : "full"}`,
+      latency: payload.inference_seconds,
+    });
     coveredSegmentIds = forceFull || !incremental
       ? new Set(snapshot.map(segment => segment.id))
       : new Set([
@@ -487,6 +504,34 @@ async function generateSummary(forceFull = false) {
     renderSummary();
     syncUI();
   }
+}
+
+function addInferenceEvent(event) {
+  inferenceEvents.unshift({ ...event, sequence: inferenceEvents.length + 1 });
+  renderInferenceEvents();
+}
+
+function renderInferenceEvents() {
+  el.contextCount.textContent = `${inferenceEvents.length} 次推論`;
+  if (!inferenceEvents.length) {
+    el.contextList.innerHTML = `<p>推論開始後會在這裡顯示每次的 context 長度。</p>`;
+    return;
+  }
+  el.contextList.innerHTML = inferenceEvents.map(event => `<article><span class="context-type ${event.type.toLowerCase()}">${event.type}</span><strong>${event.context}</strong><small>${event.detail}</small><time>${Number(event.latency || 0).toFixed(2)}s</time></article>`).join("");
+}
+
+function toggleOnlineSummary() {
+  onlineSummaryEnabled = !onlineSummaryEnabled;
+  if (!onlineSummaryEnabled) {
+    clearTimeout(summaryTimer);
+    summaryTimer = null;
+    showToast("Online summary 已關閉；仍可手動產生摘要");
+  } else {
+    showToast("Online summary 已開啟");
+    scheduleRollingSummary({ immediate: true });
+  }
+  renderSummary();
+  syncUI();
 }
 
 async function copySummary() {
@@ -528,7 +573,6 @@ function escapeHTML(text) { const node = document.createElement("span"); node.te
 function showToast(message) { el.toast.textContent = message; el.toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => el.toast.classList.remove("show"), 3000); }
 
 el.playButton.addEventListener("click", togglePlay);
-el.demoVisual.addEventListener("click", togglePlay);
 el.timeline.addEventListener("input", () => { capturer.discard(); const total = activeMedia.duration || 92.54; activeMedia.currentTime = (Number(el.timeline.value) / 100) * total; syncUI(); });
 el.soundButton.addEventListener("click", () => { activeMedia.muted = !activeMedia.muted; el.soundButton.textContent = activeMedia.muted ? "×" : "⌁"; el.soundButton.classList.toggle("muted", activeMedia.muted); });
 el.restartButton.addEventListener("click", restart);
@@ -539,6 +583,7 @@ el.fileInput.addEventListener("change", event => {
 });
 el.copyButton.addEventListener("click", copyTranscript);
 el.summaryButton.addEventListener("click", () => generateSummary(true));
+el.onlineSummaryToggle.addEventListener("click", toggleOnlineSummary);
 el.copySummaryButton.addEventListener("click", copySummary);
 el.youtubeForm.addEventListener("submit", event => {
   event.preventDefault();
@@ -550,7 +595,7 @@ document.addEventListener("keydown", event => { if (event.code === "Space" && !/
 
 bindMedia(el.demoAudio);
 bindMedia(el.video);
-setupWave();
 renderCompleted();
 renderSummary();
+renderInferenceEvents();
 checkHealth();
