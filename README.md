@@ -1,14 +1,21 @@
 # Murmur realtime transcript
 
 Murmur captures the audio from the video or audio file that is currently playing, sends
-voice-activity-gated 16 kHz PCM chunks (roughly 1-8 seconds, cut at natural pauses) to a
+voice-activity-gated 16 kHz PCM chunks (roughly 1-16 seconds, cut at natural pauses) to a
 local inference service, and appends each Qwen3-ASR result to the transcript panel. The
 source media itself is never uploaded as a file. Local MP3, other browser-supported audio,
-and browser-supported video files share the same flow.
+and browser-supported video files share the same flow. Once transcript segments exist, a
+manual action sends their text and timestamps to a local Qwen3 language model and renders
+a structured summary, key points, decisions, and action items.
 
 ## Run locally on Apple Silicon
 
-Use the existing MLX environment. The page shows model readiness while it loads.
+Use the existing MLX environment. The page reports ASR and summary model readiness
+independently while they load. Install the language-model runtime once:
+
+```bash
+/Users/guanlunlu/.pyenv/versions/murmur-qwen-asr-mlx/bin/pip install mlx-lm
+```
 
 ```bash
 /Users/guanlunlu/.pyenv/versions/murmur-qwen-asr-mlx/bin/python backend/server.py
@@ -20,11 +27,14 @@ Optional configuration:
 
 ```bash
 MURMUR_ASR_MODEL=mlx-community/Qwen3-ASR-1.7B-8bit \
+MURMUR_SUMMARY_MODEL=Qwen/Qwen3-8B-MLX-4bit \
   /Users/guanlunlu/.pyenv/versions/murmur-qwen-asr-mlx/bin/python backend/server.py --port 8787
 ```
 
 The chunk endpoint accepts mono little-endian Float32 PCM at 16 kHz. `GET
-/api/health` reports model readiness and `POST /api/transcribe` runs one chunk.
+/api/health` reports both model states, `POST /api/transcribe` runs one audio chunk,
+and `POST /api/summarize` accepts the accumulated transcript segments. The first normal
+startup downloads the configured MLX summary weights into the Hugging Face cache.
 
 ## Test against a YouTube video
 
@@ -51,5 +61,6 @@ python -m unittest tests.test_server
 ```
 
 The deployed static prototype remains useful as a UI preview, but realtime inference
-must currently be run through the local server because the model requires Apple Metal
-and roughly 4 GB of memory.
+must currently be run through the local server because the POC models require Apple
+Metal. This stage intentionally targets MLX; an RTX backend abstraction is deferred until
+the summary workflow and output quality are validated.

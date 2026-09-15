@@ -76,6 +76,17 @@
       </aside>
     </section>
 
+    <section class="summary-panel">
+      <div class="summary-heading">
+        <div><p class="eyebrow">MEETING NOTES</p><h2>AI 摘要</h2><p id="summaryMeta">先產生逐字稿，再由本機 Qwen3 整理重點。</p></div>
+        <button id="summaryButton" type="button" disabled>產生摘要</button>
+      </div>
+      <div class="summary-content" id="summaryContent" aria-live="polite">
+        <div class="summary-empty"><strong>摘要會出現在這裡</strong><p>目前採手動產生，方便先確認逐字稿完整度與摘要品質。</p></div>
+      </div>
+      <footer class="summary-footer"><span id="summaryRuntime">摘要模型載入中</span><button id="copySummaryButton" type="button" disabled>複製摘要</button></footer>
+    </section>
+
     <section class="privacy-note"><span>⌂</span><p><strong>影音檔留在你的裝置上</strong><br />來源檔只在瀏覽器播放；系統會將播放中的短音訊片段送到這台電腦上的 Qwen3-ASR，逐段產生真實逐字稿。</p></section>
   </main>
   <div class="toast" id="toast" role="status"></div>

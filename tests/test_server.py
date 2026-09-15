@@ -32,6 +32,7 @@ class ServerSmokeTest(unittest.TestCase):
         status, payload = self.get_json("/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["summary"]["status"], "ready")
         self.assertEqual(payload["sample_rate"], SAMPLE_RATE)
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             self.assertEqual(response.status, 200)
@@ -62,6 +63,32 @@ class ServerSmokeTest(unittest.TestCase):
             data=b"\0" * 16,
             method="POST",
             headers={"Content-Type": "application/octet-stream"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_transcript_is_summarized(self):
+        request = urllib.request.Request(
+            self.base_url + "/api/summarize",
+            data=json.dumps(
+                {"segments": [{"start": 1.0, "end": 3.0, "text": "今天確認摘要功能。"}]}
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["summary"], "這是一份測試逐字稿摘要。")
+        self.assertEqual(payload["key_points"], ["摘要 API 已收到逐字稿"])
+        self.assertEqual(payload["action_items"], [])
+
+    def test_empty_transcript_is_rejected(self):
+        request = urllib.request.Request(
+            self.base_url + "/api/summarize",
+            data=json.dumps({"segments": []}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
         )
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=2)

@@ -2,8 +2,15 @@
 
 Generated index. Session files are the source of truth.
 
+## Active
+
+- [Serialize MLX ASR and summary startup](sessions/2026/09/20260915T122404Z-serialize-mlx-asr-and-summary-startup.md) — 2026-09-15T12:24:04Z — asr, bugfix, mlx, startup, summary
+
 ## Completed
 
+- [Complete Apple MLX summary POC startup verification](sessions/2026/09/20260915T122756Z-complete-apple-mlx-summary-poc-startup-verification.md) — 2026-09-15T12:27:56Z — asr, mlx, poc, startup, summary
+- [Implement Apple MLX summary POC](sessions/2026/09/20260915T121457Z-implement-apple-mlx-summary-poc.md) — 2026-09-15T12:14:57Z — asr, frontend, mlx, qwen, summary
+- [Establish VAD v1 baseline](sessions/2026/09/20260915T115001Z-establish-vad-v1-baseline.md) — 2026-09-15T11:50:01Z — asr, frontend, realtime, vad
 - [Tune VAD hangover and max chunk length from live testing](sessions/2026/09/20260915T114714Z-tune-vad-hangover-and-max-chunk-length-from-live-testing.md) — 2026-09-15T11:47:14Z — asr, frontend, realtime, vad
 - [Add YouTube link testing via server-side yt-dlp download](sessions/2026/09/20260915T113725Z-add-youtube-link-testing-via-server-side-yt-dlp-download.md) — 2026-09-15T11:37:25Z — asr, backend, frontend, testing, youtube
 - [Add client-side VAD gating for realtime ASR chunks](sessions/2026/09/20260915T111922Z-add-client-side-vad-gating-for-realtime-asr-chunks.md) — 2026-09-15T11:19:22Z — asr, frontend, realtime, vad

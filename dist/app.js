@@ -5,12 +5,15 @@ const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
 
-const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel"];
+const ids = ["uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","video","demoAudio","demoVisual","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","visualWave","runtimeLabel","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
+let summaryStatus = "loading";
+let summaryResult = null;
+let summaryPending = false;
 let sessionGeneration = 0;
 let pendingRequests = 0;
 let healthTimer = null;
@@ -164,6 +167,7 @@ async function transcribeChunk(pcm, start, end, generation) {
     if (generation !== sessionGeneration) return;
     const text = String(payload.text || "").trim();
     if (text) {
+      if (summaryResult) { summaryResult = null; renderSummary(); }
       segments.push({ start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
       segments.sort((a, b) => a.start - b.start);
       renderCompleted();
@@ -203,6 +207,9 @@ function syncUI() {
   const latest = segments.at(-1);
   el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
   el.demoVisual.classList.toggle("playing", activeMedia === el.demoAudio && !activeMedia.paused);
+  el.summaryButton.disabled = summaryPending || summaryStatus !== "ready" || !segments.length;
+  el.summaryButton.textContent = summaryPending ? "整理中…" : summaryResult ? "重新產生" : "產生摘要";
+  el.copySummaryButton.disabled = !summaryResult;
 }
 
 function renderCompleted() {
@@ -263,8 +270,10 @@ function bindMedia(media) {
 function resetTranscript() {
   sessionGeneration++;
   segments = [];
+  summaryResult = null;
   capturer.discard();
   renderCompleted();
+  renderSummary();
   syncUI();
 }
 
@@ -348,20 +357,77 @@ async function copyTranscript() {
   try { await navigator.clipboard.writeText(text); showToast("已複製目前的逐字稿"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
 }
 
+function renderSummary() {
+  if (!summaryResult) {
+    el.summaryContent.innerHTML = `<div class="summary-empty"><strong>摘要會出現在這裡</strong><p>目前採手動產生，方便先確認逐字稿完整度與摘要品質。</p></div>`;
+    el.summaryMeta.textContent = "先產生逐字稿，再由本機 Qwen3 整理重點。";
+    syncUI();
+    return;
+  }
+  const list = (title, items) => items.length ? `<div class="summary-block"><h3>${title}</h3><ul>${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul></div>` : "";
+  const actions = summaryResult.action_items.map(item => {
+    const meta = [item.owner && `負責：${item.owner}`, item.due && `期限：${item.due}`].filter(Boolean).join(" · ");
+    return meta ? `${item.task}（${meta}）` : item.task;
+  });
+  el.summaryContent.innerHTML = `<div class="summary-grid"><div><div class="summary-block"><h3>摘要</h3><p>${escapeHTML(summaryResult.summary)}</p></div>${list("重點", summaryResult.key_points)}</div><div>${list("決策", summaryResult.decisions)}${list("待辦事項", actions)}</div></div>`;
+  el.summaryMeta.textContent = `根據 ${segments.length} 段逐字稿整理 · ${Number(summaryResult.inference_seconds || 0).toFixed(1)} 秒`;
+  syncUI();
+}
+
+async function generateSummary() {
+  if (!segments.length || summaryPending) return;
+  const generation = sessionGeneration;
+  summaryPending = true;
+  syncUI();
+  try {
+    const response = await fetch("/api/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ segments: segments.map(({ start, end, text }) => ({ start, end, text })) }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || "摘要失敗");
+    if (generation !== sessionGeneration) return;
+    summaryResult = payload;
+    renderSummary();
+  } catch (error) {
+    showToast(`摘要暫時無法產生：${error.message}`);
+    checkHealth();
+  } finally {
+    summaryPending = false;
+    syncUI();
+  }
+}
+
+async function copySummary() {
+  if (!summaryResult) return;
+  const sections = [
+    `摘要\n${summaryResult.summary}`,
+    summaryResult.key_points.length ? `重點\n${summaryResult.key_points.map(item => `- ${item}`).join("\n")}` : "",
+    summaryResult.decisions.length ? `決策\n${summaryResult.decisions.map(item => `- ${item}`).join("\n")}` : "",
+    summaryResult.action_items.length ? `待辦事項\n${summaryResult.action_items.map(item => `- ${item.task}${item.owner ? `（${item.owner}）` : ""}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+  try { await navigator.clipboard.writeText(sections); showToast("已複製摘要"); } catch (_) { showToast("瀏覽器無法存取剪貼簿"); }
+}
+
 async function checkHealth() {
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const health = await response.json();
     serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
+    summaryStatus = health.summary?.status === "ready" ? "ready" : health.summary?.status === "loading" ? "loading" : "error";
     el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
+    el.summaryRuntime.textContent = health.summary?.model || (summaryStatus === "loading" ? "摘要模型載入中" : "摘要模型無法使用");
   } catch (_) {
     serverStatus = "error";
+    summaryStatus = "error";
     el.runtimeLabel.textContent = "未連接本機 inference service";
+    el.summaryRuntime.textContent = "未連接本機 inference service";
   }
   updatePlaybackState();
   clearTimeout(healthTimer);
-  if (serverStatus !== "ready") healthTimer = setTimeout(checkHealth, 2000);
+  if (serverStatus !== "ready" || summaryStatus === "loading") healthTimer = setTimeout(checkHealth, 2000);
   return serverStatus;
 }
 
@@ -380,6 +446,8 @@ el.fileInput.addEventListener("change", event => {
   event.target.value = "";
 });
 el.copyButton.addEventListener("click", copyTranscript);
+el.summaryButton.addEventListener("click", generateSummary);
+el.copySummaryButton.addEventListener("click", copySummary);
 el.youtubeForm.addEventListener("submit", event => {
   event.preventDefault();
   const url = el.youtubeUrl.value.trim();
@@ -392,4 +460,5 @@ bindMedia(el.demoAudio);
 bindMedia(el.video);
 setupWave();
 renderCompleted();
+renderSummary();
 checkHealth();
