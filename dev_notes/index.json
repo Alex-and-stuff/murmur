@@ -2,6 +2,43 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260915T153833Z-replace-the-rolling-summary-with-bounded-meeting-state",
+      "created_at": "2026-09-15T15:38:33Z",
+      "title": "Replace the rolling summary with bounded meeting state",
+      "status": "active",
+      "tags": [
+        "api",
+        "context-budget",
+        "llm",
+        "meeting-state",
+        "sqlite",
+        "tests"
+      ],
+      "files": [
+        "backend/http_app.py",
+        "backend/llm.py",
+        "backend/meeting/config.py",
+        "backend/meeting/context.py",
+        "backend/meeting/engine.py",
+        "backend/meeting/finalizer.py",
+        "backend/meeting/models.py",
+        "backend/meeting/prompts.py",
+        "backend/meeting/scheduler.py",
+        "backend/meeting/service.py",
+        "backend/meeting/store.py",
+        "backend/meeting/tokens.py",
+        "backend/meeting/updater.py",
+        "dev_notes/plan/CONTEXT_IMPLEMENTATION_PLAN.md",
+        "dist/app.js",
+        "tests/test_meeting_context.py",
+        "tests/test_meeting_engine.py",
+        "tests/test_meeting_longrun.py"
+      ],
+      "branch": "feat/online-summary",
+      "commit": "5cc8175",
+      "path": "sessions/2026/09/20260915T153833Z-replace-the-rolling-summary-with-bounded-meeting-state.md"
+    },
+    {
       "id": "20260915T153330Z-split-the-backend-server-into-focused-modules",
       "created_at": "2026-09-15T15:33:30Z",
       "title": "Split the backend server into focused modules",

@@ -4,6 +4,7 @@ Generated index. Session files are the source of truth.
 
 ## Active
 
+- [Replace the rolling summary with bounded meeting state](sessions/2026/09/20260915T153833Z-replace-the-rolling-summary-with-bounded-meeting-state.md) — 2026-09-15T15:38:33Z — api, context-budget, llm, meeting-state, sqlite, tests
 - [Serialize MLX ASR and summary startup](sessions/2026/09/20260915T122404Z-serialize-mlx-asr-and-summary-startup.md) — 2026-09-15T12:24:04Z — asr, bugfix, mlx, startup, summary
 
 ## Completed
