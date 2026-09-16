@@ -18,3 +18,4 @@ __pycache__/
 .venv-qwen-asr/
 asr-server.stdout.log
 asr-server.stderr.log
+.python-version
