@@ -37,6 +37,16 @@ h1 { font-size: clamp(2.6rem, 4.5vw, 4.8rem); line-height: .99; letter-spacing: 
 .video-card video.visible { display: block; }
 .video-badge { position: absolute; top: 20px; right: 20px; z-index: 3; background: rgba(13,15,19,.63); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.16); color: white; padding: 7px 10px; border-radius: 99px; font-size: .65rem; }
 .video-badge span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #68dfa9; margin-right: 5px; }
+.capture-source { padding: 15px 22px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 11px 14px; align-items: end; }
+.capture-field { display: grid; gap: 5px; min-width: 0; }
+.capture-field[hidden] { display: none; }
+.capture-field > span { font: 500 .62rem "DM Mono", monospace; letter-spacing: .1em; color: #8a867f; }
+.capture-field select { width: 100%; border: 1px solid #cbc5bb; border-radius: 10px; background: transparent; padding: 8px 10px; font-size: .78rem; color: inherit; }
+.capture-field select:focus { outline: none; border-color: var(--orange); }
+.capture-level { grid-column: 1 / -1; height: 5px; border-radius: 99px; background: #ece8e0; overflow: hidden; }
+.capture-level i { display: block; height: 100%; width: var(--level, 0%); border-radius: 99px; background: var(--green); transition: width .12s linear; }
+.capture-hint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .7rem; line-height: 1.65; }
+.live-capture .timeline, .live-capture .sound-button { opacity: .38; pointer-events: none; }
 .player-controls { height: 72px; padding: 0 22px; display: flex; align-items: center; gap: 13px; border-bottom: 1px solid var(--line); }
 .play-button { width: 38px; height: 38px; flex: 0 0 auto; border: 0; border-radius: 50%; background: var(--orange); color: white; display: grid; place-items: center; font-size: .8rem; padding-left: 3px; }
 .time { font: 500 .7rem "DM Mono", monospace; font-variant-numeric: tabular-nums; }.time.muted { color: #99948c; }

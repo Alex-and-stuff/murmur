@@ -2,11 +2,14 @@ const TARGET_SAMPLE_RATE = 16000;
 const MIN_CHUNK_SECONDS = 1;
 const MAX_CHUNK_SECONDS = 16;
 const SPEECH_RMS_THRESHOLD = 0.012;
+const LIVE_RMS_BASE = { microphone: 0.012, system: 0.006, mixed: 0.008 };
+const NOISE_FLOOR_ATTACK = 0.05;
+const NOISE_FLOOR_MARGIN = 2.5;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
 const STATE_POLL_MS = 2000;
 
-const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
+const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList","captureMode","audioDevice","audioDeviceRow","liveMeter","liveHint"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
 let uploadUrl = null;
@@ -25,23 +28,35 @@ let pendingRequests = 0;
 let healthTimer = null;
 let inferenceRange = null;
 let inferenceEvents = [];
+let captureMode = "media";
+let liveActive = false;
+let liveStreams = [];
+let liveStartedAt = 0;
+let liveOffset = 0;
 
 class RealtimeCapture {
   constructor() {
     this.context = null;
     this.nodes = new Map();
+    this.liveNodes = null;
     this.samples = [];
     this.sampleCount = 0;
     this.captureStart = null;
     this.hasSpeech = false;
     this.silenceSeconds = 0;
     this.preRoll = [];
+    this.noiseFloor = 0;
     this.requestChain = Promise.resolve();
   }
 
-  async attach(media) {
+  async ensureContext() {
     if (!this.context) this.context = new AudioContext({ latencyHint: "interactive" });
     await this.context.resume();
+    return this.context;
+  }
+
+  async attach(media) {
+    await this.ensureContext();
     if (this.nodes.has(media)) return;
     const source = this.context.createMediaElementSource(media);
     const processor = this.context.createScriptProcessor(4096, 2, 1);
@@ -51,12 +66,47 @@ class RealtimeCapture {
     source.connect(processor);
     processor.connect(silent);
     silent.connect(this.context.destination);
-    processor.onaudioprocess = event => this.receive(media, event.inputBuffer);
+    processor.onaudioprocess = event => {
+      if (captureMode !== "media" || media !== activeMedia || media.paused || media.ended) return;
+      this.ingest(event.inputBuffer);
+    };
     this.nodes.set(media, { source, processor, silent });
   }
 
-  receive(media, input) {
-    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error") return;
+  // A live device is never routed back to the speakers: monitoring a microphone
+  // would feed the room into itself, and monitoring system audio would double it.
+  async attachStreams(streams) {
+    await this.ensureContext();
+    this.detachStreams();
+    const mixer = this.context.createGain();
+    const processor = this.context.createScriptProcessor(4096, 2, 1);
+    const silent = this.context.createGain();
+    silent.gain.value = 0;
+    const sources = streams.map(stream => {
+      const source = this.context.createMediaStreamSource(stream);
+      source.connect(mixer);
+      return source;
+    });
+    mixer.connect(processor);
+    processor.connect(silent);
+    silent.connect(this.context.destination);
+    processor.onaudioprocess = event => { if (liveActive) this.ingest(event.inputBuffer); };
+    this.liveNodes = { sources, mixer, processor, silent };
+  }
+
+  detachStreams() {
+    if (!this.liveNodes) return;
+    const { sources, mixer, processor, silent } = this.liveNodes;
+    processor.onaudioprocess = null;
+    sources.forEach(source => source.disconnect());
+    mixer.disconnect();
+    processor.disconnect();
+    silent.disconnect();
+    this.liveNodes = null;
+  }
+
+  ingest(input) {
+    if (serverStatus === "error") return;
     const mono = new Float32Array(input.length);
     for (let channel = 0; channel < input.numberOfChannels; channel++) {
       const data = input.getChannelData(channel);
@@ -64,7 +114,12 @@ class RealtimeCapture {
     }
     const resampled = downsample(mono, this.context.sampleRate, TARGET_SAMPLE_RATE);
     const frameSeconds = resampled.length / TARGET_SAMPLE_RATE;
-    const speaking = computeRMS(resampled) >= SPEECH_RMS_THRESHOLD;
+    const rms = computeRMS(resampled);
+    renderLevel(rms);
+    // Meeting and system audio swing far more than a close microphone, so the gate
+    // rides a slowly tracked noise floor instead of one absolute threshold.
+    const speaking = rms >= Math.max(speechThreshold(), this.noiseFloor * NOISE_FLOOR_MARGIN);
+    if (!speaking) this.noiseFloor = this.noiseFloor * (1 - NOISE_FLOOR_ATTACK) + rms * NOISE_FLOOR_ATTACK;
 
     if (!speaking && !this.hasSpeech) {
       this.preRoll.push(resampled);
@@ -77,7 +132,7 @@ class RealtimeCapture {
       this.silenceSeconds = 0;
       if (!this.hasSpeech) {
         const preRollSeconds = this.preRoll.reduce((sum, chunk) => sum + chunk.length, 0) / TARGET_SAMPLE_RATE;
-        this.captureStart = Math.max(0, media.currentTime - frameSeconds - preRollSeconds);
+        this.captureStart = Math.max(0, captureClock() - frameSeconds - preRollSeconds);
         for (const chunk of this.preRoll) { this.samples.push(chunk); this.sampleCount += chunk.length; }
         this.preRoll = [];
         this.hasSpeech = true;
@@ -103,7 +158,7 @@ class RealtimeCapture {
       return;
     }
     const pcm = concatSamples(this.samples, this.sampleCount);
-    const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - this.sampleCount / TARGET_SAMPLE_RATE);
+    const start = this.captureStart ?? Math.max(0, captureClock() - this.sampleCount / TARGET_SAMPLE_RATE);
     const end = start + this.sampleCount / TARGET_SAMPLE_RATE;
     const generation = sessionGeneration;
     this.samples = [];
@@ -126,6 +181,29 @@ class RealtimeCapture {
 }
 
 const capturer = new RealtimeCapture();
+
+// Playback has a seekable clock of its own; a live device only has elapsed time,
+// carried across device switches by liveOffset so the transcript stays ordered.
+function liveSeconds() {
+  if (!liveActive || !capturer.context) return liveOffset;
+  return liveOffset + Math.max(0, capturer.context.currentTime - liveStartedAt);
+}
+
+function captureClock() {
+  return captureMode === "media" ? activeMedia.currentTime || 0 : liveSeconds();
+}
+
+function isCapturing() {
+  return captureMode === "media" ? !activeMedia.paused : liveActive;
+}
+
+function speechThreshold() {
+  return captureMode === "media" ? SPEECH_RMS_THRESHOLD : LIVE_RMS_BASE[captureMode] || SPEECH_RMS_THRESHOLD;
+}
+
+function renderLevel(rms) {
+  el.liveMeter.style.setProperty("--level", `${Math.min(100, rms * 1400).toFixed(0)}%`);
+}
 
 function downsample(input, sourceRate, targetRate) {
   if (sourceRate === targetRate) return input.slice();
@@ -204,17 +282,19 @@ function formatTime(value) {
 }
 
 function syncUI() {
-  const current = activeMedia.currentTime || 0;
+  const live = captureMode !== "media";
+  const current = captureClock();
   const total = activeMedia.duration || 92.54;
-  const ratio = Math.min(1, current / total);
+  const ratio = live ? 0 : Math.min(1, current / total);
   el.currentTime.textContent = formatTime(current);
-  el.duration.textContent = formatTime(total);
+  el.duration.textContent = live ? "LIVE" : formatTime(total);
+  el.timeline.disabled = live;
   el.timeline.value = ratio * 100;
   el.timeline.style.setProperty("--progress", `${ratio * 100}%`);
   el.lineCount.textContent = `${segments.length} 段`;
   el.progressBar.style.width = `${ratio * 100}%`;
   const latest = segments.at(-1);
-  el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
+  el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : isCapturing() ? "正在收音" : "尚未開始";
   const pending = meetingState ? meetingState.pending_segment_count : 0;
   el.summaryButton.disabled = rolloutPending || summaryStatus !== "ready" || !meetingId || !pending;
   el.summaryButton.textContent = rolloutPending ? "更新中…" : "立即整理";
@@ -230,7 +310,12 @@ function renderCompleted() {
     return;
   }
   el.transcriptStream.innerHTML = segments.map((segment, index) => `<article class="transcript-line${index === segments.length - 1 ? " latest" : ""}" data-start="${segment.start}"><button type="button" aria-label="跳到 ${formatTime(segment.start)}">${formatTime(segment.start)}</button><p>${escapeHTML(segment.text)}</p></article>`).join("");
-  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); }));
+  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => {
+    if (captureMode !== "media") return;
+    capturer.discard();
+    activeMedia.currentTime = Number(row.dataset.start);
+    syncUI();
+  }));
   requestAnimationFrame(() => { el.transcriptStream.scrollTop = el.transcriptStream.scrollHeight; });
 }
 
@@ -238,37 +323,153 @@ function renderDraft(bufferedSeconds = 0, start = null, end = null) {
   if (pendingRequests) {
     const range = inferenceRange || { start, end };
     el.liveDraft.hidden = false;
-    el.draftTime.textContent = formatTime(range.start ?? activeMedia.currentTime);
+    el.draftTime.textContent = formatTime(range.start ?? captureClock());
     el.draftText.innerHTML = `正在辨識 ${formatTime(range.start)}–${formatTime(range.end)} 的聲音<i class="caret"></i>`;
     return;
   }
-  if (activeMedia.paused || !bufferedSeconds) { el.liveDraft.hidden = true; return; }
+  if (!isCapturing() || !bufferedSeconds) { el.liveDraft.hidden = true; return; }
   el.liveDraft.hidden = false;
-  el.draftTime.textContent = formatTime(Math.max(0, activeMedia.currentTime - bufferedSeconds));
+  el.draftTime.textContent = formatTime(Math.max(0, captureClock() - bufferedSeconds));
   el.draftText.innerHTML = `正在聆聽，已收集 ${bufferedSeconds.toFixed(1)} 秒<i class="caret"></i>`;
 }
 
 async function togglePlay() {
-  if (!activeMedia.paused) { activeMedia.pause(); return; }
-  if (serverStatus !== "ready") {
-    showToast(serverStatus === "loading" ? "模型仍在載入，請稍候" : "請先啟動本機 inference service");
-    await checkHealth();
+  if (captureMode !== "media") {
+    if (liveActive) { stopLive(); return; }
+    if (!(await readyForCapture())) return;
+    await startLive();
     return;
   }
+  if (!activeMedia.paused) { activeMedia.pause(); return; }
+  if (!(await readyForCapture())) return;
   try {
     await capturer.attach(activeMedia);
     await activeMedia.play();
   } catch (_) { showToast("無法播放或擷取這個檔案的聲音"); }
 }
 
+async function readyForCapture() {
+  if (serverStatus === "ready") return true;
+  showToast(serverStatus === "loading" ? "模型仍在載入，請稍候" : "請先啟動本機 inference service");
+  await checkHealth();
+  return false;
+}
+
+async function requestMicrophone() {
+  const deviceId = el.audioDevice.value;
+  // Browser conditioning is left off: automatic gain would distort the RMS gate and
+  // echo cancellation would strip the far end out of a mixed meeting capture.
+  const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  return navigator.mediaDevices.getUserMedia({ audio });
+}
+
+// Chrome exposes system and tab audio only through getDisplayMedia, and only when
+// the share dialog is asked for video too; that video track is dropped at once.
+async function requestSystemAudio() {
+  if (!navigator.mediaDevices.getDisplayMedia) throw new Error("這個瀏覽器不支援系統音擷取");
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: true,
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  stream.getVideoTracks().forEach(track => { track.stop(); stream.removeTrack(track); });
+  if (!stream.getAudioTracks().length) throw new Error("分享時請一併勾選「分享分頁音訊／系統音訊」");
+  return stream;
+}
+
+async function startLive(reset = true) {
+  try {
+    // Streams land in liveStreams as they are granted, not after both resolve: if the
+    // system-audio dialog is cancelled, stopLive() still has to release the microphone.
+    liveStreams = [];
+    if (captureMode === "microphone" || captureMode === "mixed") liveStreams.push(await requestMicrophone());
+    if (captureMode === "system" || captureMode === "mixed") liveStreams.push(await requestSystemAudio());
+    const streams = liveStreams;
+    streams.forEach(stream => stream.getAudioTracks().forEach(track => track.addEventListener("ended", () => {
+      if (!liveActive) return;
+      stopLive();
+      showToast("收音來源已結束");
+    })));
+    await capturer.attachStreams(streams);
+    if (reset) liveOffset = 0;
+    liveStartedAt = capturer.context.currentTime;
+    liveActive = true;
+    capturer.noiseFloor = 0;
+    // A fresh meeting only makes sense once the previous one actually holds
+    // transcript; an untouched meeting is reused instead of being orphaned.
+    if (reset && segments.length) resetTranscript();
+    updatePlaybackState();
+    populateDevices();
+    showToast(captureMode === "system" ? "開始擷取系統音" : captureMode === "mixed" ? "開始擷取麥克風與系統音" : "開始擷取麥克風");
+  } catch (error) {
+    stopLive();
+    showToast(`無法開始收音：${error.message}`);
+  }
+}
+
+function stopLive() {
+  if (liveActive) {
+    liveOffset = liveSeconds();
+    capturer.flush();
+  }
+  liveActive = false;
+  capturer.detachStreams();
+  liveStreams.forEach(stream => stream.getTracks().forEach(track => track.stop()));
+  liveStreams = [];
+  renderLevel(0);
+  updatePlaybackState();
+}
+
+function captureHint() {
+  if (captureMode === "microphone") return "按下播放開始收音，麥克風的聲音會即時送去辨識。";
+  if (captureMode === "system") return "按下播放後選擇要分享的分頁或螢幕，並勾選分享音訊；macOS 也可改選 BlackHole 之類的虛擬輸入裝置。";
+  if (captureMode === "mixed") return "同時收錄你的麥克風與會議播出的聲音，兩路在擷取端混成單聲道。";
+  return "播放下方的檔案，播放中的聲音會即時送去辨識。";
+}
+
+function applyCaptureMode(mode, reset = true) {
+  if (liveActive) stopLive();
+  if (mode !== "media") activeMedia.pause();
+  captureMode = mode;
+  liveOffset = 0;
+  capturer.discard();
+  el.captureMode.value = mode;
+  el.audioDeviceRow.hidden = mode !== "microphone" && mode !== "mixed";
+  el.mediaColumn.classList.toggle("live-capture", mode !== "media");
+  el.liveHint.textContent = captureHint();
+  renderLevel(0);
+  if (mode !== "media") populateDevices();
+  if (reset && segments.length) resetTranscript();
+  updatePlaybackState();
+}
+
+// Device labels stay empty until a stream has been granted once, so the list is
+// rebuilt again after every successful start.
+async function populateDevices() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(device => device.kind === "audioinput");
+    const previous = el.audioDevice.value;
+    el.audioDevice.innerHTML = ['<option value="">系統預設輸入</option>']
+      .concat(inputs.map((device, index) => `<option value="${escapeHTML(device.deviceId)}">${escapeHTML(device.label || `輸入裝置 ${index + 1}`)}</option>`))
+      .join("");
+    if (previous && inputs.some(device => device.deviceId === previous)) el.audioDevice.value = previous;
+  } catch (_) {
+    // Device enumeration is a convenience; the default input still works without it.
+  }
+}
+
 function updatePlaybackState() {
-  const playing = !activeMedia.paused;
+  const live = captureMode !== "media";
+  const playing = isCapturing();
   el.playIcon.textContent = playing ? "Ⅱ" : "▶";
-  el.playButton.setAttribute("aria-label", playing ? "暫停" : "播放");
+  el.playButton.setAttribute("aria-label", playing ? (live ? "停止收音" : "暫停") : live ? "開始收音" : "播放");
   el.statusPill.classList.toggle("active", playing && serverStatus === "ready");
+  const idleText = live ? (liveOffset ? "已停止收音" : "可以開始收音") : activeMedia.currentTime ? "已暫停" : "可以開始";
   if (serverStatus === "loading") el.statusText.textContent = "模型載入中";
   else if (serverStatus === "error") el.statusText.textContent = "後端未連線";
-  else el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "可以開始";
+  else el.statusText.textContent = playing ? "辨識中" : idleText;
   if (!playing) capturer.flush();
   syncUI();
 }
@@ -299,6 +500,7 @@ function resetTranscript() {
 }
 
 function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toastMessage }) {
+  if (captureMode !== "media") applyCaptureMode("media", false);
   activeMedia.pause();
   if (isAudio) {
     el.video.pause();
@@ -368,6 +570,13 @@ async function loadYoutubeMedia(url) {
 }
 
 function restart() {
+  if (captureMode !== "media") {
+    stopLive();
+    liveOffset = 0;
+    resetTranscript();
+    updatePlaybackState();
+    return;
+  }
   activeMedia.pause();
   activeMedia.currentTime = 0;
   resetTranscript();
@@ -616,7 +825,13 @@ function escapeHTML(text) { const node = document.createElement("span"); node.te
 function showToast(message) { el.toast.textContent = message; el.toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => el.toast.classList.remove("show"), 3000); }
 
 el.playButton.addEventListener("click", togglePlay);
-el.timeline.addEventListener("input", () => { capturer.discard(); const total = activeMedia.duration || 92.54; activeMedia.currentTime = (Number(el.timeline.value) / 100) * total; syncUI(); });
+el.timeline.addEventListener("input", () => {
+  if (captureMode !== "media") return;
+  capturer.discard();
+  const total = activeMedia.duration || 92.54;
+  activeMedia.currentTime = (Number(el.timeline.value) / 100) * total;
+  syncUI();
+});
 el.soundButton.addEventListener("click", () => { activeMedia.muted = !activeMedia.muted; el.soundButton.textContent = activeMedia.muted ? "×" : "⌁"; el.soundButton.classList.toggle("muted", activeMedia.muted); });
 el.restartButton.addEventListener("click", restart);
 el.uploadButton.addEventListener("click", () => el.fileInput.click());
@@ -624,6 +839,13 @@ el.fileInput.addEventListener("change", event => {
   if (event.target.files[0]) loadMedia(event.target.files[0]);
   event.target.value = "";
 });
+el.captureMode.addEventListener("change", () => applyCaptureMode(el.captureMode.value));
+el.audioDevice.addEventListener("change", async () => {
+  if (!liveActive) return;
+  stopLive();
+  await startLive(false);
+});
+if (navigator.mediaDevices) navigator.mediaDevices.addEventListener("devicechange", () => { if (captureMode !== "media") populateDevices(); });
 el.copyButton.addEventListener("click", copyTranscript);
 el.summaryButton.addEventListener("click", forceRollout);
 el.finalizeButton.addEventListener("click", finalizeMeeting);
@@ -639,6 +861,7 @@ document.addEventListener("keydown", event => { if (event.code === "Space" && !/
 
 bindMedia(el.demoAudio);
 bindMedia(el.video);
+el.liveHint.textContent = captureHint();
 renderCompleted();
 renderSummary();
 renderInferenceEvents();
