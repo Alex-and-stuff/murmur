@@ -1,12 +1,13 @@
 const TARGET_SAMPLE_RATE = 16000;
 const MIN_CHUNK_SECONDS = 1;
-const MAX_CHUNK_SECONDS = 16;
+const MAX_CHUNK_SECONDS = 10;
+const PROVISIONAL_INTERVAL_SECONDS = 2;
 const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
 const STATE_POLL_MS = 2000;
 
-const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
+const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
 let uploadUrl = null;
@@ -25,6 +26,10 @@ let pendingRequests = 0;
 let healthTimer = null;
 let inferenceRange = null;
 let inferenceEvents = [];
+let liveHypothesis = null;
+let hypothesisAnimationId = 0;
+let renderedHypothesis = null;
+let finalAnimationId = 0;
 
 class RealtimeCapture {
   constructor() {
@@ -37,6 +42,9 @@ class RealtimeCapture {
     this.silenceSeconds = 0;
     this.preRoll = [];
     this.requestChain = Promise.resolve();
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    this.utteranceId = 0;
   }
 
   async attach(media) {
@@ -89,6 +97,7 @@ class RealtimeCapture {
     this.samples.push(resampled);
     this.sampleCount += resampled.length;
     renderDraft(this.sampleCount / TARGET_SAMPLE_RATE);
+    this.queueProvisional();
 
     const bufferedSeconds = this.sampleCount / TARGET_SAMPLE_RATE;
     if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= MAX_CHUNK_SECONDS) {
@@ -106,12 +115,35 @@ class RealtimeCapture {
     const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - this.sampleCount / TARGET_SAMPLE_RATE);
     const end = start + this.sampleCount / TARGET_SAMPLE_RATE;
     const generation = sessionGeneration;
+    const utteranceId = ++this.utteranceId;
     this.samples = [];
     this.sampleCount = 0;
     this.captureStart = null;
     this.hasSpeech = false;
     this.silenceSeconds = 0;
-    this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation));
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation, { utteranceId }));
+  }
+
+  queueProvisional() {
+    if (this.provisionalRequestQueued || !this.hasSpeech || this.sampleCount < MIN_CHUNK_SECONDS * TARGET_SAMPLE_RATE || this.sampleCount - this.lastProvisionalSampleCount < PROVISIONAL_INTERVAL_SECONDS * TARGET_SAMPLE_RATE) return;
+    const pcm = concatSamples(this.samples, this.sampleCount);
+    const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - pcm.length / TARGET_SAMPLE_RATE);
+    const end = start + pcm.length / TARGET_SAMPLE_RATE;
+    const generation = sessionGeneration;
+    const utteranceId = this.utteranceId;
+    this.lastProvisionalSampleCount = this.sampleCount;
+    this.provisionalRequestQueued = true;
+    this.requestChain = this.requestChain
+      .then(() => {
+        if (utteranceId !== this.utteranceId) return;
+        return transcribeChunk(pcm, start, end, generation, { provisional: true, utteranceId });
+      })
+      .finally(() => {
+        this.provisionalRequestQueued = false;
+        if (this.hasSpeech && utteranceId === this.utteranceId) this.queueProvisional();
+      });
   }
 
   discard() {
@@ -121,6 +153,11 @@ class RealtimeCapture {
     this.hasSpeech = false;
     this.silenceSeconds = 0;
     this.preRoll = [];
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    this.utteranceId++;
+    liveHypothesis = null;
+    hypothesisAnimationId++;
     renderDraft(0);
   }
 }
@@ -154,7 +191,7 @@ function concatSamples(chunks, length) {
   return output;
 }
 
-async function transcribeChunk(pcm, start, end, generation) {
+async function transcribeChunk(pcm, start, end, generation, { provisional = false, utteranceId = null } = {}) {
   pendingRequests++;
   inferenceRange = { start, end };
   renderDraft(0, start, end);
@@ -171,7 +208,7 @@ async function transcribeChunk(pcm, start, end, generation) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || payload.error || "辨識失敗");
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration || (utteranceId !== null && utteranceId !== capturer.utteranceId)) return;
     addInferenceEvent({
       type: "ASR",
       context: `${Number(payload.audio_seconds || 0).toFixed(1)} 秒`,
@@ -180,7 +217,16 @@ async function transcribeChunk(pcm, start, end, generation) {
     });
     const text = String(payload.text || "").trim();
     if (text) {
-      segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
+      if (provisional) {
+        const visibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+        liveHypothesis = { start: payload.start, end: payload.end, previousEnd: liveHypothesis?.end ?? payload.start, text, visibleText };
+        renderCompleted();
+        return;
+      }
+      const finalVisibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+      liveHypothesis = null;
+      hypothesisAnimationId++;
+      segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, visibleText: finalVisibleText, latency: payload.inference_seconds });
       segments.sort((a, b) => a.start - b.start);
       renderCompleted();
       sendSegment({ text, start: payload.start, end: payload.end });
@@ -225,27 +271,110 @@ function syncUI() {
 }
 
 function renderCompleted() {
-  if (!segments.length) {
-    el.transcriptStream.innerHTML = `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
+  const stream = el.transcriptStream;
+  const stickToBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
+  if (!segments.length && !liveHypothesis) {
+    renderedHypothesis = null;
+    const placeholderClass = !activeMedia.paused || pendingRequests ? "list-placeholder" : "empty-state";
+    if (stream.children.length !== 1 || !stream.querySelector(`:scope > .${placeholderClass}`)) {
+      stream.innerHTML = placeholderClass === "list-placeholder"
+        ? `<div class="list-placeholder"><i></i>正在收音，暫定文字很快會出現在這裡</div>`
+        : `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
+    }
     return;
   }
-  el.transcriptStream.innerHTML = segments.map((segment, index) => `<article class="transcript-line${index === segments.length - 1 ? " latest" : ""}" data-start="${segment.start}"><button type="button" aria-label="跳到 ${formatTime(segment.start)}">${formatTime(segment.start)}</button><p>${escapeHTML(segment.text)}</p></article>`).join("");
-  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); }));
-  requestAnimationFrame(() => { el.transcriptStream.scrollTop = el.transcriptStream.scrollHeight; });
+  stream.querySelectorAll(":scope > .empty-state, :scope > .list-placeholder").forEach(node => node.remove());
+  const segmentIds = new Set(segments.map(segment => String(segment.id)));
+  stream.querySelectorAll(":scope > article[data-segment-id]").forEach(row => { if (!segmentIds.has(row.dataset.segmentId)) row.remove(); });
+  let provisionalRow = stream.querySelector(":scope > article.provisional");
+  segments.forEach((segment, index) => {
+    let row = stream.querySelector(`:scope > article[data-segment-id="${segment.id}"]`);
+    const isNewRow = !row;
+    if (isNewRow) {
+      row = document.createElement("article");
+      row.className = "transcript-line";
+      row.dataset.segmentId = String(segment.id);
+      row.dataset.start = String(segment.start);
+      const time = document.createElement("button"); time.type = "button";
+      const text = document.createElement("p");
+      row.append(time, text);
+      row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); });
+      stream.insertBefore(row, provisionalRow);
+    }
+    const time = row.querySelector("button");
+    time.textContent = formatTime(segment.start);
+    time.setAttribute("aria-label", `跳到 ${formatTime(segment.start)}`);
+    if (isNewRow) {
+      const text = row.querySelector("p");
+      const initialText = segment.visibleText ?? segment.text;
+      text.textContent = initialText;
+      if (initialText !== segment.text) animateFinalSegment(text, segment);
+    }
+    row.classList.toggle("latest", index === segments.length - 1 && !liveHypothesis);
+  });
+  if (liveHypothesis) {
+    if (!provisionalRow) {
+      provisionalRow = document.createElement("article");
+      provisionalRow.className = "transcript-line provisional";
+      provisionalRow.setAttribute("aria-live", "polite");
+      const time = document.createElement("span"); time.className = "provisional-time";
+      const text = document.createElement("p");
+      const label = document.createElement("small"); label.textContent = "暫定";
+      const hypothesisText = document.createElement("span"); hypothesisText.className = "provisional-text";
+      const caret = document.createElement("i"); caret.className = "caret";
+      text.append(label, hypothesisText, caret); provisionalRow.append(time, text); stream.append(provisionalRow);
+    }
+    provisionalRow.querySelector(".provisional-time").textContent = formatTime(liveHypothesis.start);
+    const target = provisionalRow.querySelector(".provisional-text");
+    if (renderedHypothesis !== liveHypothesis) {
+      target.textContent = liveHypothesis.visibleText;
+      renderedHypothesis = liveHypothesis;
+      animateHypothesis(liveHypothesis, target);
+    }
+  } else { provisionalRow?.remove(); renderedHypothesis = null; }
+  if (stickToBottom) stream.scrollTop = stream.scrollHeight;
 }
 
-function renderDraft(bufferedSeconds = 0, start = null, end = null) {
-  if (pendingRequests) {
-    const range = inferenceRange || { start, end };
-    el.liveDraft.hidden = false;
-    el.draftTime.textContent = formatTime(range.start ?? activeMedia.currentTime);
-    el.draftText.innerHTML = `正在辨識 ${formatTime(range.start)}–${formatTime(range.end)} 的聲音<i class="caret"></i>`;
-    return;
-  }
-  if (activeMedia.paused || !bufferedSeconds) { el.liveDraft.hidden = true; return; }
-  el.liveDraft.hidden = false;
-  el.draftTime.textContent = formatTime(Math.max(0, activeMedia.currentTime - bufferedSeconds));
-  el.draftText.innerHTML = `正在聆聽，已收集 ${bufferedSeconds.toFixed(1)} 秒<i class="caret"></i>`;
+function renderDraft() {}
+
+function animateHypothesis(hypothesis, target) {
+  const animationId = ++hypothesisAnimationId;
+  const characters = graphemes(hypothesis.text);
+  const initialCount = graphemes(hypothesis.visibleText).length;
+  const duration = Math.min(1000, Math.max(350, Math.max(.5, hypothesis.end - hypothesis.previousEnd) * 450));
+  const startedAt = performance.now();
+  const renderFrame = now => {
+    if (animationId !== hypothesisAnimationId || !target.isConnected) return;
+    const count = initialCount + Math.ceil((characters.length - initialCount) * Math.min(1, (now - startedAt) / duration));
+    hypothesis.visibleText = characters.slice(0, count).join(""); target.textContent = hypothesis.visibleText;
+    if (count < characters.length) requestAnimationFrame(renderFrame);
+  };
+  requestAnimationFrame(renderFrame);
+}
+
+function animateFinalSegment(target, segment) {
+  const animationId = ++finalAnimationId;
+  const characters = graphemes(segment.text);
+  const initialCount = graphemes(segment.visibleText || "").length;
+  const duration = Math.min(700, Math.max(240, (characters.length - initialCount) * 16));
+  const startedAt = performance.now();
+  const renderFrame = now => {
+    if (animationId !== finalAnimationId || !target.isConnected) return;
+    const count = initialCount + Math.ceil((characters.length - initialCount) * Math.min(1, (now - startedAt) / duration));
+    target.textContent = characters.slice(0, count).join("");
+    if (count < characters.length) requestAnimationFrame(renderFrame);
+  };
+  requestAnimationFrame(renderFrame);
+}
+
+function graphemes(text) {
+  return typeof Intl.Segmenter === "function" ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map(part => part.segment) : Array.from(text);
+}
+
+function commonPrefix(left, right) {
+  const leftCharacters = graphemes(left); const rightCharacters = graphemes(right); let index = 0;
+  while (index < leftCharacters.length && leftCharacters[index] === rightCharacters[index]) index++;
+  return leftCharacters.slice(0, index).join("");
 }
 
 async function togglePlay() {
@@ -270,6 +399,7 @@ function updatePlaybackState() {
   else if (serverStatus === "error") el.statusText.textContent = "後端未連線";
   else el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "可以開始";
   if (!playing) capturer.flush();
+  renderCompleted();
   syncUI();
 }
 
@@ -288,6 +418,8 @@ function resetTranscript() {
   rolloutPending = false;
   nextSegmentId = 1;
   inferenceEvents = [];
+  liveHypothesis = null;
+  hypothesisAnimationId++;
   clearTimeout(statePollTimer);
   statePollTimer = null;
   capturer.discard();

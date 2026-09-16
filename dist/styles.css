@@ -54,19 +54,20 @@ h1 { font-size: clamp(2.6rem, 4.5vw, 4.8rem); line-height: .99; letter-spacing: 
 .status-pill span { width: 6px; height: 6px; border-radius: 50%; background: #aaa49b; }.status-pill.active { color: #27825f; background: #eff8f3; border-color: #cfe7db; }.status-pill.active span { background: var(--green); box-shadow: 0 0 0 4px rgba(66,167,123,.1); animation: pulse 1.4s infinite; }
 .progress-row { padding: 0 24px 8px; display: flex; justify-content: space-between; color: #8f8a82; font-size: .66rem; }
 .progress-track { height: 2px; margin: 0 24px; background: #ebe7df; }.progress-track i { display: block; width: 0; height: 100%; background: var(--orange); transition: width .35s; }
-.transcript-stream { flex: 1; min-height: 236px; max-height: 330px; overflow-y: auto; padding: 8px 24px 10px; scroll-behavior: smooth; }
+.transcript-stream { flex: 1; min-height: 236px; max-height: 330px; overflow-y: auto; padding: 8px 24px 10px; }
 .transcript-stream::-webkit-scrollbar { width: 4px; }.transcript-stream::-webkit-scrollbar-thumb { background: #d8d3ca; border-radius: 5px; }
 .empty-state { min-height: 240px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .empty-glyph { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 14px; background: var(--orange-soft); color: var(--orange); font-family: Georgia, serif; font-style: italic; margin-bottom: 13px; }
 .empty-state strong { font-size: .85rem; }.empty-state p { max-width: 300px; margin: 7px 0 0; color: #979189; font-size: .72rem; line-height: 1.6; }
-.transcript-line { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 13px 3px; border-bottom: 1px solid #ebe7df; animation: enter .3s ease both; cursor: pointer; }
+.list-placeholder { display: flex; align-items: center; gap: 8px; padding: 16px 3px; color: #979189; font-size: .74rem; }
+.list-placeholder i { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); animation: pulse 1.2s infinite; }
+.transcript-line { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 13px 3px; border-bottom: 1px solid #ebe7df; cursor: pointer; }
 .transcript-line button { border: 0; padding: 3px 0; background: none; text-align: left; color: #a29c94; font: 500 .62rem "DM Mono", monospace; }
 .transcript-line p { margin: 0; font-size: .8rem; line-height: 1.66; color: #494641; }.transcript-line:hover p, .transcript-line.latest p { color: var(--ink); }
-.live-draft { margin: 0 20px 16px; padding: 14px 15px; min-height: 86px; background: var(--orange-soft); border: 1px solid #ffded0; border-radius: 11px; }
-.live-draft[hidden] { display: none; }
-.draft-meta { display: flex; justify-content: space-between; font: 500 .6rem "DM Mono", monospace; color: #a86958; }
-.draft-meta span { display: flex; align-items: center; gap: 6px; }.draft-meta i { width: 5px; height: 5px; border-radius: 50%; background: var(--orange); animation: pulse 1.2s infinite; }
-.live-draft p { margin: 10px 0 0; color: #4f332b; font-size: .82rem; line-height: 1.6; }.caret { display: inline-block; width: 2px; height: 1em; background: var(--orange); margin-left: 2px; vertical-align: -.12em; animation: blink .75s steps(1) infinite; }
+.transcript-line.provisional { cursor: default; background: linear-gradient(90deg, rgba(255,240,233,.8), transparent); border-bottom-color: #ffded0; }
+.provisional-time { padding: 3px 0; color: #cf806c; font: 500 .62rem "DM Mono", monospace; }
+.transcript-line.provisional p { color: #4f332b; }.transcript-line.provisional small { display: inline-block; margin-right: 7px; color: #c96d56; font: 500 .58rem "DM Mono", monospace; letter-spacing: .06em; }
+.caret { display: inline-block; width: 2px; height: 1em; background: var(--orange); margin-left: 2px; vertical-align: -.12em; animation: blink .75s steps(1) infinite; }
 .panel-footer { padding: 14px 24px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; color: #969087; font-size: .65rem; }
 .panel-footer span { display: flex; align-items: center; gap: 6px; min-width: 0; }.panel-footer span i { width: 6px; height: 6px; flex: 0 0 auto; background: var(--green); border-radius: 50%; }.panel-footer span b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.panel-footer button { border: 0; background: transparent; flex: 0 0 auto; font-size: .7rem; color: #5f5b55; font-weight: 600; }
 .summary-panel { margin-top: 20px; border: 1px solid var(--line); background: var(--card); border-radius: 18px; overflow: hidden; box-shadow: 0 14px 45px rgba(66, 54, 38, .06); }
