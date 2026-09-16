@@ -38,7 +38,7 @@ h1 { font-size: clamp(2.6rem, 4.5vw, 4.8rem); line-height: .99; letter-spacing: 
 .video-badge { position: absolute; top: 20px; right: 20px; z-index: 3; background: rgba(13,15,19,.63); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.16); color: white; padding: 7px 10px; border-radius: 99px; font-size: .65rem; }
 .video-badge span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #68dfa9; margin-right: 5px; }
 .player-controls { height: 72px; padding: 0 22px; display: flex; align-items: center; gap: 13px; border-bottom: 1px solid var(--line); }
-.play-button { width: 38px; height: 38px; flex: 0 0 auto; border: 0; border-radius: 50%; background: var(--orange); color: white; display: grid; place-items: center; font-size: .8rem; padding-left: 3px; }
+.play-button { width: 38px; height: 38px; flex: 0 0 auto; border: 0; border-radius: 50%; background: var(--orange); color: white; display: grid; place-items: center; font-size: .8rem; padding-left: 3px; }.play-button:disabled, .timeline:disabled, .media-meta button:disabled { opacity: .4; cursor: not-allowed; }
 .time { font: 500 .7rem "DM Mono", monospace; font-variant-numeric: tabular-nums; }.time.muted { color: #99948c; }
 .timeline { --progress: 0%; appearance: none; height: 3px; border-radius: 5px; flex: 1; background: linear-gradient(90deg, var(--orange) var(--progress), #dedad3 var(--progress)); cursor: pointer; }
 .timeline::-webkit-slider-thumb { appearance: none; width: 13px; height: 13px; border-radius: 50%; background: white; border: 3px solid var(--orange); box-shadow: 0 1px 4px rgba(0,0,0,.18); }

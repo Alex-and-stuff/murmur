@@ -6,6 +6,9 @@ local inference service, and appends each Qwen3-ASR result to the transcript pan
 source media itself is never uploaded as a file. Local MP3, other browser-supported audio,
 and browser-supported video files share the same flow.
 
+No demo clip ships with this repository, so the page starts with an empty player: upload
+your own audio/video or paste a YouTube link to begin.
+
 Transcript segments then feed a **bounded meeting state** instead of an ever-growing
 rolling summary. Raw ASR is stored verbatim and queued; once the queue crosses a token or
 time threshold, one rollout sends a fixed-size prompt to the local 8B model:

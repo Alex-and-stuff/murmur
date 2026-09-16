@@ -11,6 +11,7 @@ const STATE_POLL_MS = 2000;
 const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
+let mediaUnavailable = !el.demoAudio.getAttribute("src");
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
@@ -355,15 +356,18 @@ function formatTime(value) {
 function syncUI() {
   const current = activeMedia.currentTime || 0;
   const total = activeMedia.duration || 92.54;
-  const ratio = Math.min(1, current / total);
+  const ratio = mediaUnavailable ? 0 : Math.min(1, current / total);
   el.currentTime.textContent = formatTime(current);
-  el.duration.textContent = formatTime(total);
+  el.duration.textContent = mediaUnavailable ? "--:--" : formatTime(total);
+  el.playButton.disabled = mediaUnavailable;
+  el.timeline.disabled = mediaUnavailable;
+  el.restartButton.disabled = mediaUnavailable;
   el.timeline.value = ratio * 100;
   el.timeline.style.setProperty("--progress", `${ratio * 100}%`);
   el.lineCount.textContent = `${segments.length} 段`;
   el.progressBar.style.width = `${ratio * 100}%`;
   const latest = segments.at(-1);
-  el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
+  el.progressText.textContent = mediaUnavailable ? "尚未載入媒體" : pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
   const pending = meetingState ? meetingState.pending_segment_count : 0;
   el.summaryButton.disabled = rolloutPending || summaryStatus !== "ready" || !meetingId || !pending;
   el.summaryButton.textContent = rolloutPending ? "更新中…" : "立即整理";
@@ -378,11 +382,13 @@ function renderCompleted() {
   const stickToBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
   if (!segments.length && !liveHypothesis) {
     renderedHypothesis = null;
-    const placeholderClass = !activeMedia.paused || pendingRequests ? "list-placeholder" : "empty-state";
-    if (stream.children.length !== 1 || !stream.querySelector(`:scope > .${placeholderClass}`)) {
-      stream.innerHTML = placeholderClass === "list-placeholder"
-        ? `<div class="list-placeholder"><i></i>正在收音，暫定文字很快會出現在這裡</div>`
-        : `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
+    const placeholder = !activeMedia.paused || pendingRequests ? "listening" : mediaUnavailable ? "no-media" : "idle";
+    if (stream.children.length !== 1 || stream.firstElementChild?.dataset.placeholder !== placeholder) {
+      stream.innerHTML = placeholder === "listening"
+        ? `<div class="list-placeholder" data-placeholder="listening"><i></i>正在收音，暫定文字很快會出現在這裡</div>`
+        : placeholder === "no-media"
+        ? `<div class="empty-state" data-placeholder="no-media"><div class="empty-glyph">Aa</div><strong>請先載入音訊或影片</strong><p>本專案未附帶示範音檔。請用右上角的「換一個檔案」上傳本機音訊／影片，或貼上 YouTube 連結。</p></div>`
+        : `<div class="empty-state" data-placeholder="idle"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
     }
     return;
   }
@@ -481,6 +487,7 @@ function commonPrefix(left, right) {
 }
 
 async function togglePlay() {
+  if (mediaUnavailable) return showToast("請先上傳音訊／影片，或貼上 YouTube 連結");
   if (!activeMedia.paused) { activeMedia.pause(); return; }
   if (serverStatus !== "ready") {
     showToast(
@@ -515,6 +522,7 @@ function bindMedia(media) {
   ["timeupdate", "loadedmetadata", "durationchange"].forEach(name => media.addEventListener(name, syncUI));
   ["play", "pause", "ended"].forEach(name => media.addEventListener(name, updatePlaybackState));
   media.addEventListener("seeking", () => capturer.discard());
+  media.addEventListener("error", () => { if (media !== activeMedia) return; mediaUnavailable = true; el.mediaTitle.textContent = "媒體載入失敗"; el.mediaMeta.textContent = "請改用其他檔案或 YouTube 連結"; showToast("這個媒體來源無法載入"); updatePlaybackState(); });
 }
 
 function resetTranscript() {
@@ -540,6 +548,7 @@ function resetTranscript() {
 
 function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toastMessage }) {
   activeMedia.pause();
+  mediaUnavailable = false;
   if (isAudio) {
     el.video.pause();
     el.video.classList.remove("visible");
