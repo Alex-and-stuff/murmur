@@ -2,6 +2,25 @@
   "version": 1,
   "entries": [
     {
+      "id": "20260916T162431Z-confirm-the-cuda-asr-backends-on-ubuntu-nvidia",
+      "created_at": "2026-09-16T16:24:31Z",
+      "title": "Confirm the CUDA ASR backends on Ubuntu + NVIDIA",
+      "status": "active",
+      "tags": [
+        "asr",
+        "cuda",
+        "streaming",
+        "verification",
+        "vllm"
+      ],
+      "files": [
+        "backend/asr.py"
+      ],
+      "branch": "main",
+      "commit": "2271da3",
+      "path": "sessions/2026/09/20260916T162431Z-confirm-the-cuda-asr-backends-on-ubuntu-nvidia.md"
+    },
+    {
       "id": "20260916T151920Z-review-and-patch-the-vllm-streaming-asr-pr",
       "created_at": "2026-09-16T15:19:20Z",
       "title": "Review and patch the vLLM streaming ASR PR",
