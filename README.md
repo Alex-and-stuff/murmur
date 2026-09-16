@@ -149,3 +149,30 @@ Start with the smaller Qwen model, which downloads automatically on its first ru
 Then open <http://127.0.0.1:8787>. The service health endpoint should show
 `Qwen/Qwen3-ASR-0.6B · Transformers CUDA`. On the tested RTX 3060 Ti (8 GB), this model
 used about 3.2 GB VRAM and transcribed five seconds of Chinese audio in 2.31 seconds.
+
+## Run stateful streaming ASR through WSL2
+
+Qwen's official streaming mode uses vLLM, which runs on Linux rather than native Windows.
+On an NVIDIA Windows machine, use WSL2 and keep the Windows Transformers service stopped so
+vLLM has exclusive access to the GPU.
+
+```bash
+# Run inside Ubuntu (WSL), once.
+python3 -m venv ~/.venvs/murmur-qwen-vllm
+~/.venvs/murmur-qwen-vllm/bin/pip install --upgrade pip
+~/.venvs/murmur-qwen-vllm/bin/pip install 'qwen-asr[vllm]' yt-dlp
+```
+
+Start Murmur from the WSL copy of the repository:
+
+```bash
+cd /mnt/d/Alex/projects/AudioToText/murmur
+~/.venvs/murmur-qwen-vllm/bin/python backend/server.py \
+  --port 8788 --backend vllm --model Qwen/Qwen3-ASR-0.6B --summary-backend off \
+  --vllm-gpu-memory-utilization 0.75 --vllm-max-model-len 4096
+```
+
+The browser continues to use <http://127.0.0.1:8788>. When the health response exposes
+`streaming: true`, it sends new one-second PCM audio to one stateful Qwen session. The model
+manages its own rolling text and token rollback; at a natural pause the browser calls `finish`
+and commits the final segment.

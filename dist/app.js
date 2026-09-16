@@ -1,6 +1,7 @@
 const TARGET_SAMPLE_RATE = 16000;
 const MIN_CHUNK_SECONDS = 1;
 const MAX_CHUNK_SECONDS = 10;
+const MAX_STREAM_SECONDS = 25;
 const PROVISIONAL_INTERVAL_SECONDS = 2;
 const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
@@ -13,6 +14,7 @@ let activeMedia = el.demoAudio;
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
+let streamingEnabled = false;
 let summaryStatus = "loading";
 let meetingId = null;
 let meetingState = null;
@@ -45,6 +47,7 @@ class RealtimeCapture {
     this.lastProvisionalSampleCount = 0;
     this.provisionalRequestQueued = false;
     this.utteranceId = 0;
+    this.stream = null;
   }
 
   async attach(media) {
@@ -89,6 +92,7 @@ class RealtimeCapture {
         for (const chunk of this.preRoll) { this.samples.push(chunk); this.sampleCount += chunk.length; }
         this.preRoll = [];
         this.hasSpeech = true;
+        if (streamingEnabled) this.openStream();
       }
     } else {
       this.silenceSeconds += frameSeconds;
@@ -97,10 +101,12 @@ class RealtimeCapture {
     this.samples.push(resampled);
     this.sampleCount += resampled.length;
     renderDraft(this.sampleCount / TARGET_SAMPLE_RATE);
-    this.queueProvisional();
+    if (streamingEnabled) this.queueStream();
+    else this.queueProvisional();
 
     const bufferedSeconds = this.sampleCount / TARGET_SAMPLE_RATE;
-    if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= MAX_CHUNK_SECONDS) {
+    const maximumSegmentSeconds = streamingEnabled ? MAX_STREAM_SECONDS : MAX_CHUNK_SECONDS;
+    if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= maximumSegmentSeconds) {
       this.flush();
     }
   }
@@ -123,7 +129,34 @@ class RealtimeCapture {
     this.silenceSeconds = 0;
     this.lastProvisionalSampleCount = 0;
     this.provisionalRequestQueued = false;
-    this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation, { utteranceId }));
+    const stream = this.stream;
+    this.stream = null;
+    if (streamingEnabled && stream) {
+      const tail = pcm.slice(stream.sentSamples);
+      this.requestChain = this.requestChain.then(() => finishStream(stream, tail, start, end, generation));
+    } else {
+      this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation, { utteranceId }));
+    }
+  }
+
+  openStream() {
+    const stream = { id: null, startPromise: null, sentSamples: 0 };
+    stream.startPromise = startStream().then(id => { stream.id = id; return id; });
+    this.stream = stream;
+  }
+
+  queueStream() {
+    const stream = this.stream;
+    if (!stream || !this.hasSpeech || this.sampleCount - stream.sentSamples < TARGET_SAMPLE_RATE) return;
+    const pcm = concatSamples(this.samples, this.sampleCount).slice(stream.sentSamples);
+    const start = (this.captureStart ?? activeMedia.currentTime) + stream.sentSamples / TARGET_SAMPLE_RATE;
+    const end = start + pcm.length / TARGET_SAMPLE_RATE;
+    const generation = sessionGeneration;
+    stream.sentSamples = this.sampleCount;
+    this.requestChain = this.requestChain.then(async () => {
+      const streamId = stream.id || await stream.startPromise;
+      return pushStream(streamId, pcm, start, end, generation);
+    });
   }
 
   queueProvisional() {
@@ -147,6 +180,8 @@ class RealtimeCapture {
   }
 
   discard() {
+    const stream = this.stream;
+    if (stream) stream.startPromise.then(streamId => abortStream(streamId)).catch(() => {});
     this.samples = [];
     this.sampleCount = 0;
     this.captureStart = null;
@@ -155,6 +190,7 @@ class RealtimeCapture {
     this.preRoll = [];
     this.lastProvisionalSampleCount = 0;
     this.provisionalRequestQueued = false;
+    this.stream = null;
     this.utteranceId++;
     liveHypothesis = null;
     hypothesisAnimationId++;
@@ -215,22 +251,8 @@ async function transcribeChunk(pcm, start, end, generation, { provisional = fals
       detail: `${Number(payload.context_samples || pcm.length).toLocaleString()} samples`,
       latency: payload.inference_seconds,
     });
-    const text = String(payload.text || "").trim();
-    if (text) {
-      if (provisional) {
-        const visibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
-        liveHypothesis = { start: payload.start, end: payload.end, previousEnd: liveHypothesis?.end ?? payload.start, text, visibleText };
-        renderCompleted();
-        return;
-      }
-      const finalVisibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
-      liveHypothesis = null;
-      hypothesisAnimationId++;
-      segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, visibleText: finalVisibleText, latency: payload.inference_seconds });
-      segments.sort((a, b) => a.start - b.start);
-      renderCompleted();
-      sendSegment({ text, start: payload.start, end: payload.end });
-    }
+    if (provisional) showProvisional(payload.text, payload.start, payload.end);
+    else commitFinal(payload.text, payload.start, payload.end, payload.inference_seconds);
   } catch (error) {
     showToast(`逐字稿暫時無法產生：${error.message}`);
     checkHealth();
@@ -238,6 +260,85 @@ async function transcribeChunk(pcm, start, end, generation, { provisional = fals
     pendingRequests--;
     inferenceRange = null;
     if (!pendingRequests) renderDraft(0);
+    syncUI();
+  }
+}
+
+function showProvisional(rawText, start, end) {
+  const text = String(rawText || "").trim();
+  if (!text) return;
+  const visibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+  liveHypothesis = { start, end, previousEnd: liveHypothesis?.end ?? start, text, visibleText };
+  renderCompleted();
+}
+
+function commitFinal(rawText, start, end, latency) {
+  const text = String(rawText || "").trim();
+  if (!text) return;
+  const finalVisibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+  liveHypothesis = null;
+  hypothesisAnimationId++;
+  segments.push({ id: nextSegmentId++, start, end, text, visibleText: finalVisibleText, latency });
+  segments.sort((a, b) => a.start - b.start);
+  renderCompleted();
+  sendSegment({ text, start, end });
+}
+
+async function startStream() {
+  const response = await fetch("/api/streams", { method: "POST", headers: { "X-Language": "Chinese" } });
+  const payload = await response.json();
+  if (!response.ok || !payload.stream_id) throw new Error(payload.detail || payload.error || "無法建立串流辨識");
+  return payload.stream_id;
+}
+
+async function streamAudio(streamId, action, pcm) {
+  const response = await fetch(`/api/streams/${streamId}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: pcm,
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || payload.error || "串流辨識失敗");
+  return payload;
+}
+
+async function abortStream(streamId) {
+  await fetch(`/api/streams/${streamId}/abort`, { method: "POST" });
+}
+
+async function pushStream(streamId, pcm, start, end, generation) {
+  pendingRequests++;
+  inferenceRange = { start, end };
+  try {
+    const payload = await streamAudio(streamId, "chunk", pcm);
+    if (generation !== sessionGeneration) return;
+    addInferenceEvent({ type: "ASR", context: `${(pcm.length / TARGET_SAMPLE_RATE).toFixed(1)} 秒 streaming`, detail: "stateful session", latency: payload.inference_seconds });
+    showProvisional(payload.text, start, end);
+  } catch (error) {
+    showToast(`串流逐字稿暫時無法產生：${error.message}`);
+    checkHealth();
+  } finally {
+    pendingRequests--;
+    inferenceRange = null;
+    syncUI();
+  }
+}
+
+async function finishStream(stream, pcm, start, end, generation) {
+  pendingRequests++;
+  inferenceRange = { start, end };
+  try {
+    const streamId = stream.id || await stream.startPromise;
+    const payload = await streamAudio(streamId, "finish", pcm);
+    if (generation !== sessionGeneration) return;
+    addInferenceEvent({ type: "ASR", context: `${(pcm.length / TARGET_SAMPLE_RATE).toFixed(1)} 秒 final`, detail: "stateful session", latency: payload.inference_seconds });
+    commitFinal(payload.text, start, end, payload.inference_seconds);
+  } catch (error) {
+    showToast(`串流逐字稿暫時無法完成：${error.message}`);
+    checkHealth();
+  } finally {
+    pendingRequests--;
+    inferenceRange = null;
     syncUI();
   }
 }
@@ -724,6 +825,7 @@ async function checkHealth() {
     if (!response.ok) throw new Error();
     const health = await response.json();
     serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
+    streamingEnabled = serverStatus === "ready" && health.streaming === true;
     summaryStatus = health.summary?.status === "ready" ? "ready" : health.summary?.status === "loading" ? "loading" : "error";
     el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
     const budget = health.summary?.max_context_tokens;
