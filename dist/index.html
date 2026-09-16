@@ -39,6 +39,24 @@
         </div>
         <audio id="demoAudio" preload="metadata"></audio>
 
+        <div class="capture-source">
+          <label class="capture-field">
+            <span>收音來源</span>
+            <select id="captureMode">
+              <option value="media">播放檔案</option>
+              <option value="microphone">麥克風</option>
+              <option value="system">系統音／會議音</option>
+              <option value="mixed">麥克風＋系統音</option>
+            </select>
+          </label>
+          <label class="capture-field" id="audioDeviceRow" hidden>
+            <span>輸入裝置</span>
+            <select id="audioDevice"><option value="">系統預設輸入</option></select>
+          </label>
+          <div class="capture-level" aria-hidden="true"><i id="liveMeter"></i></div>
+          <p class="capture-hint" id="liveHint">播放下方的檔案，播放中的聲音會即時送去辨識。</p>
+        </div>
+
         <div class="player-controls">
           <button class="play-button" id="playButton" type="button" aria-label="播放"><span id="playIcon">▶</span></button>
           <span class="time" id="currentTime">00:00</span>
@@ -87,7 +105,7 @@
       <div class="context-list" id="contextList" aria-live="polite"><p>推論開始後會在這裡顯示每次的 context 長度。</p></div>
     </section>
 
-    <section class="privacy-note"><span>⌂</span><p><strong>影音檔留在你的裝置上</strong><br />來源檔只在瀏覽器播放；系統會將播放中的短音訊片段送到這台電腦上的 Qwen3-ASR，逐段產生真實逐字稿。</p></section>
+    <section class="privacy-note"><span>⌂</span><p><strong>聲音留在你的裝置上</strong><br />來源檔只在瀏覽器播放，麥克風與系統音也只在瀏覽器擷取；系統只會把語音片段送到這台電腦上的 Qwen3-ASR，逐段產生真實逐字稿。</p></section>
   </main>
   <div class="toast" id="toast" role="status"></div>
   <script src="app.js"></script>

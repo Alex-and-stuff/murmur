@@ -1,10 +1,10 @@
 # Murmur realtime transcript
 
-Murmur captures the audio from the video or audio file that is currently playing, sends
-voice-activity-gated 16 kHz PCM chunks (roughly 1-16 seconds, cut at natural pauses) to a
-local inference service, and appends each Qwen3-ASR result to the transcript panel. The
-source media itself is never uploaded as a file. Local MP3, other browser-supported audio,
-and browser-supported video files share the same flow.
+Murmur captures audio in the browser, sends voice-activity-gated 16 kHz PCM chunks
+(roughly 1-16 seconds, cut at natural pauses) to a local inference service, and appends
+each Qwen3-ASR result to the transcript panel. Audio never leaves the machine as a file.
+The source can be a played media file (local MP3, other browser-supported audio,
+browser-supported video, or YouTube audio) or a **live audio device** — see 收音來源 below.
 
 No demo clip ships with this repository, so the page starts with an empty player: upload
 your own audio/video or paste a YouTube link to begin.
@@ -196,6 +196,34 @@ request.
 
 Rollout metrics feed the inference debug panel: per-block token counts, the operation the
 model chose, any compaction that was applied, latency and retries.
+
+## Capture from an audio device
+
+The 收音來源 selector above the transport switches what the VAD listens to. Every mode
+feeds the same chunking, `/api/transcribe` call and meeting-state pipeline; only the clock
+and the gate differ.
+
+| Mode | Source | Notes |
+| --- | --- | --- |
+| 播放檔案 | The `<audio>`/`<video>` element | Seekable; timestamps come from `currentTime` |
+| 麥克風 | `getUserMedia` on the selected input | Device list is populated from `enumerateDevices` |
+| 系統音／會議音 | `getDisplayMedia`, video track dropped | Tick "share tab/system audio" in the share dialog |
+| 麥克風＋系統音 | Both of the above, mixed to mono | For two-way meetings |
+
+A live source has no seekable timeline, so timestamps come from an elapsed-seconds session
+clock; the timeline and mute controls are disabled and the duration reads `LIVE`. Changing
+the input device mid-session keeps the clock running, so the transcript stays continuous.
+Live input is never routed back to the speakers — monitoring a microphone would feed the
+room into itself.
+
+Browser audio conditioning (AGC, noise suppression, echo cancellation) is switched off:
+AGC distorts the RMS gate, and echo cancellation would strip the far end out of a mixed
+capture. Because system audio swings much more than a close microphone, the gate rides a
+slowly tracked noise floor on top of a per-mode base threshold, and the level meter under
+the selector shows what the gate currently sees.
+
+On macOS a virtual input device such as BlackHole also works: select it under 輸入裝置 in
+麥克風 mode and route the meeting app's output to it.
 
 ## Test against a YouTube video
 
