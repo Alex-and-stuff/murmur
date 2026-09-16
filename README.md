@@ -166,7 +166,7 @@ python3 -m venv ~/.venvs/murmur-qwen-vllm
 Start Murmur from the WSL copy of the repository:
 
 ```bash
-cd /mnt/d/Alex/projects/AudioToText/murmur
+cd /mnt/<drive>/path/to/murmur   # the WSL view of your Windows checkout
 ~/.venvs/murmur-qwen-vllm/bin/python backend/server.py \
   --port 8788 --backend vllm --model Qwen/Qwen3-ASR-0.6B --summary-backend off \
   --vllm-gpu-memory-utilization 0.75 --vllm-max-model-len 4096

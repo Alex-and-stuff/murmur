@@ -14,8 +14,10 @@ let activeMedia = el.demoAudio;
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
+let serverError = null;
 let streamingEnabled = false;
 let summaryStatus = "loading";
+let summaryError = null;
 let meetingId = null;
 let meetingState = null;
 let finalDocument = null;
@@ -67,7 +69,7 @@ class RealtimeCapture {
   }
 
   receive(media, input) {
-    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error") return;
+    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error" || serverStatus === "offline") return;
     const mono = new Float32Array(input.length);
     for (let channel = 0; channel < input.numberOfChannels; channel++) {
       const data = input.getChannelData(channel);
@@ -481,7 +483,11 @@ function commonPrefix(left, right) {
 async function togglePlay() {
   if (!activeMedia.paused) { activeMedia.pause(); return; }
   if (serverStatus !== "ready") {
-    showToast(serverStatus === "loading" ? "模型仍在載入，請稍候" : "請先啟動本機 inference service");
+    showToast(
+      serverStatus === "loading" ? "模型仍在載入，請稍候"
+      : serverStatus === "offline" ? "請先啟動本機 inference service"
+      : serverError ? `模型載入失敗：${briefError(serverError)}` : "模型載入失敗"
+    );
     await checkHealth();
     return;
   }
@@ -497,7 +503,8 @@ function updatePlaybackState() {
   el.playButton.setAttribute("aria-label", playing ? "暫停" : "播放");
   el.statusPill.classList.toggle("active", playing && serverStatus === "ready");
   if (serverStatus === "loading") el.statusText.textContent = "模型載入中";
-  else if (serverStatus === "error") el.statusText.textContent = "後端未連線";
+  else if (serverStatus === "offline") el.statusText.textContent = "後端未連線";
+  else if (serverStatus === "error") el.statusText.textContent = "模型載入失敗";
   else el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "可以開始";
   if (!playing) capturer.flush();
   renderCompleted();
@@ -818,23 +825,47 @@ function renderInferenceEvents() {
   el.contextList.innerHTML = events.map(event => `<article><span class="context-type ${event.type.toLowerCase()}">${event.type}</span><strong>${escapeHTML(event.context)}</strong><small>${escapeHTML(event.detail)}</small><time>${Number(event.latency || 0).toFixed(2)}s</time></article>`).join("");
 }
 
+// Backend errors are full tracebacks; the footer shows a readable head and the
+// console keeps the rest so a failed model load is diagnosable from the browser.
+function briefError(detail) {
+  const firstLine = String(detail).split("\n", 1)[0].trim();
+  return firstLine.length > 140 ? `${firstLine.slice(0, 139)}…` : firstLine;
+}
+
 async function checkHealth() {
   const previousSummaryStatus = summaryStatus;
+  const previousServerError = serverError;
+  const previousSummaryError = summaryError;
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const health = await response.json();
     serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
+    // The backend swallows load failures into health.error; without showing it the UI
+    // cannot tell "service not started" from "model failed to load".
+    serverError = serverStatus === "error" ? health.error || null : null;
+    if (serverError && serverError !== previousServerError) console.error("inference service error:", serverError);
     streamingEnabled = serverStatus === "ready" && health.streaming === true;
-    summaryStatus = health.summary?.status === "ready" ? "ready" : health.summary?.status === "loading" ? "loading" : "error";
-    el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
+    const summaryHealth = health.summary?.status;
+    summaryStatus = summaryHealth === "ready" ? "ready"
+      : summaryHealth === "loading" ? "loading"
+      : summaryHealth === "disabled" ? "disabled" : "error";
+    summaryError = summaryStatus === "error" ? health.summary?.error || null : null;
+    if (summaryError && summaryError !== previousSummaryError) console.error("summary model error:", summaryError);
+    el.runtimeLabel.textContent = health.model
+      || (serverStatus === "loading" ? "正在載入 Qwen3-ASR"
+      : serverError ? `Inference service 錯誤：${briefError(serverError)}` : "Inference service 發生錯誤");
     const budget = health.summary?.max_context_tokens;
     el.summaryRuntime.textContent = health.summary?.model
       ? `${health.summary.model} · 每輪 ${budget} tokens 預算`
-      : summaryStatus === "loading" ? "摘要模型載入中" : "摘要模型無法使用";
+      : summaryStatus === "loading" ? "摘要模型載入中"
+      : summaryStatus === "disabled" ? "摘要功能已停用"
+      : summaryError ? `摘要模型錯誤：${briefError(summaryError)}` : "摘要模型無法使用";
   } catch (_) {
-    serverStatus = "error";
+    serverStatus = "offline";
+    serverError = null;
     summaryStatus = "error";
+    summaryError = null;
     el.runtimeLabel.textContent = "未連接本機 inference service";
     el.summaryRuntime.textContent = "未連接本機 inference service";
   }
