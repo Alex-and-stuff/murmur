@@ -1,18 +1,24 @@
 const TARGET_SAMPLE_RATE = 16000;
 const MIN_CHUNK_SECONDS = 1;
-const MAX_CHUNK_SECONDS = 16;
+const MAX_CHUNK_SECONDS = 10;
+const MAX_STREAM_SECONDS = 25;
+const PROVISIONAL_INTERVAL_SECONDS = 2;
 const SPEECH_RMS_THRESHOLD = 0.012;
 const SILENCE_HANGOVER_SECONDS = 0.35;
 const PRE_ROLL_FRAMES = 2;
 const STATE_POLL_MS = 2000;
 
-const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","liveDraft","draftText","draftTime","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
+const ids = ["finalizeButton","uploadButton","fileInput","youtubeForm","youtubeUrl","youtubeSubmit","mediaColumn","videoCard","video","demoAudio","videoBadge","playButton","playIcon","currentTime","duration","timeline","soundButton","restartButton","mediaTitle","mediaMeta","statusPill","statusText","progressText","lineCount","progressBar","transcriptStream","copyButton","toast","runtimeLabel","onlineSummaryToggle","summaryButton","summaryContent","summaryMeta","summaryRuntime","copySummaryButton","contextCount","contextList"];
 const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 let activeMedia = el.demoAudio;
+let mediaUnavailable = !el.demoAudio.getAttribute("src");
 let uploadUrl = null;
 let segments = [];
 let serverStatus = "loading";
+let serverError = null;
+let streamingEnabled = false;
 let summaryStatus = "loading";
+let summaryError = null;
 let meetingId = null;
 let meetingState = null;
 let finalDocument = null;
@@ -25,6 +31,10 @@ let pendingRequests = 0;
 let healthTimer = null;
 let inferenceRange = null;
 let inferenceEvents = [];
+let liveHypothesis = null;
+let hypothesisAnimationId = 0;
+let renderedHypothesis = null;
+let finalAnimationId = 0;
 
 class RealtimeCapture {
   constructor() {
@@ -37,6 +47,10 @@ class RealtimeCapture {
     this.silenceSeconds = 0;
     this.preRoll = [];
     this.requestChain = Promise.resolve();
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    this.utteranceId = 0;
+    this.stream = null;
   }
 
   async attach(media) {
@@ -56,7 +70,7 @@ class RealtimeCapture {
   }
 
   receive(media, input) {
-    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error") return;
+    if (media !== activeMedia || media.paused || media.ended || serverStatus === "error" || serverStatus === "offline") return;
     const mono = new Float32Array(input.length);
     for (let channel = 0; channel < input.numberOfChannels; channel++) {
       const data = input.getChannelData(channel);
@@ -81,6 +95,7 @@ class RealtimeCapture {
         for (const chunk of this.preRoll) { this.samples.push(chunk); this.sampleCount += chunk.length; }
         this.preRoll = [];
         this.hasSpeech = true;
+        if (streamingEnabled) this.openStream();
       }
     } else {
       this.silenceSeconds += frameSeconds;
@@ -89,9 +104,12 @@ class RealtimeCapture {
     this.samples.push(resampled);
     this.sampleCount += resampled.length;
     renderDraft(this.sampleCount / TARGET_SAMPLE_RATE);
+    if (streamingEnabled) this.queueStream();
+    else this.queueProvisional();
 
     const bufferedSeconds = this.sampleCount / TARGET_SAMPLE_RATE;
-    if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= MAX_CHUNK_SECONDS) {
+    const maximumSegmentSeconds = streamingEnabled ? MAX_STREAM_SECONDS : MAX_CHUNK_SECONDS;
+    if (this.silenceSeconds >= SILENCE_HANGOVER_SECONDS || bufferedSeconds >= maximumSegmentSeconds) {
       this.flush();
     }
   }
@@ -106,21 +124,79 @@ class RealtimeCapture {
     const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - this.sampleCount / TARGET_SAMPLE_RATE);
     const end = start + this.sampleCount / TARGET_SAMPLE_RATE;
     const generation = sessionGeneration;
+    const utteranceId = ++this.utteranceId;
     this.samples = [];
     this.sampleCount = 0;
     this.captureStart = null;
     this.hasSpeech = false;
     this.silenceSeconds = 0;
-    this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation));
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    const stream = this.stream;
+    this.stream = null;
+    if (streamingEnabled && stream) {
+      const tail = pcm.slice(stream.sentSamples);
+      this.requestChain = this.requestChain.then(() => finishStream(stream, tail, start, end, generation));
+    } else {
+      this.requestChain = this.requestChain.then(() => transcribeChunk(pcm, start, end, generation, { utteranceId }));
+    }
+  }
+
+  openStream() {
+    const stream = { id: null, startPromise: null, sentSamples: 0 };
+    stream.startPromise = startStream().then(id => { stream.id = id; return id; });
+    this.stream = stream;
+  }
+
+  queueStream() {
+    const stream = this.stream;
+    if (!stream || !this.hasSpeech || this.sampleCount - stream.sentSamples < TARGET_SAMPLE_RATE) return;
+    const pcm = concatSamples(this.samples, this.sampleCount).slice(stream.sentSamples);
+    const start = (this.captureStart ?? activeMedia.currentTime) + stream.sentSamples / TARGET_SAMPLE_RATE;
+    const end = start + pcm.length / TARGET_SAMPLE_RATE;
+    const generation = sessionGeneration;
+    stream.sentSamples = this.sampleCount;
+    this.requestChain = this.requestChain.then(async () => {
+      const streamId = stream.id || await stream.startPromise;
+      return pushStream(streamId, pcm, start, end, generation);
+    });
+  }
+
+  queueProvisional() {
+    if (this.provisionalRequestQueued || !this.hasSpeech || this.sampleCount < MIN_CHUNK_SECONDS * TARGET_SAMPLE_RATE || this.sampleCount - this.lastProvisionalSampleCount < PROVISIONAL_INTERVAL_SECONDS * TARGET_SAMPLE_RATE) return;
+    const pcm = concatSamples(this.samples, this.sampleCount);
+    const start = this.captureStart ?? Math.max(0, activeMedia.currentTime - pcm.length / TARGET_SAMPLE_RATE);
+    const end = start + pcm.length / TARGET_SAMPLE_RATE;
+    const generation = sessionGeneration;
+    const utteranceId = this.utteranceId;
+    this.lastProvisionalSampleCount = this.sampleCount;
+    this.provisionalRequestQueued = true;
+    this.requestChain = this.requestChain
+      .then(() => {
+        if (utteranceId !== this.utteranceId) return;
+        return transcribeChunk(pcm, start, end, generation, { provisional: true, utteranceId });
+      })
+      .finally(() => {
+        this.provisionalRequestQueued = false;
+        if (this.hasSpeech && utteranceId === this.utteranceId) this.queueProvisional();
+      });
   }
 
   discard() {
+    const stream = this.stream;
+    if (stream) stream.startPromise.then(streamId => abortStream(streamId)).catch(() => {});
     this.samples = [];
     this.sampleCount = 0;
     this.captureStart = null;
     this.hasSpeech = false;
     this.silenceSeconds = 0;
     this.preRoll = [];
+    this.lastProvisionalSampleCount = 0;
+    this.provisionalRequestQueued = false;
+    this.stream = null;
+    this.utteranceId++;
+    liveHypothesis = null;
+    hypothesisAnimationId++;
     renderDraft(0);
   }
 }
@@ -154,7 +230,7 @@ function concatSamples(chunks, length) {
   return output;
 }
 
-async function transcribeChunk(pcm, start, end, generation) {
+async function transcribeChunk(pcm, start, end, generation, { provisional = false, utteranceId = null } = {}) {
   pendingRequests++;
   inferenceRange = { start, end };
   renderDraft(0, start, end);
@@ -171,20 +247,15 @@ async function transcribeChunk(pcm, start, end, generation) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || payload.error || "辨識失敗");
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration || (utteranceId !== null && utteranceId !== capturer.utteranceId)) return;
     addInferenceEvent({
       type: "ASR",
       context: `${Number(payload.audio_seconds || 0).toFixed(1)} 秒`,
       detail: `${Number(payload.context_samples || pcm.length).toLocaleString()} samples`,
       latency: payload.inference_seconds,
     });
-    const text = String(payload.text || "").trim();
-    if (text) {
-      segments.push({ id: nextSegmentId++, start: payload.start, end: payload.end, text, latency: payload.inference_seconds });
-      segments.sort((a, b) => a.start - b.start);
-      renderCompleted();
-      sendSegment({ text, start: payload.start, end: payload.end });
-    }
+    if (provisional) showProvisional(payload.text, payload.start, payload.end);
+    else commitFinal(payload.text, payload.start, payload.end, payload.inference_seconds);
   } catch (error) {
     showToast(`逐字稿暫時無法產生：${error.message}`);
     checkHealth();
@@ -192,6 +263,85 @@ async function transcribeChunk(pcm, start, end, generation) {
     pendingRequests--;
     inferenceRange = null;
     if (!pendingRequests) renderDraft(0);
+    syncUI();
+  }
+}
+
+function showProvisional(rawText, start, end) {
+  const text = String(rawText || "").trim();
+  if (!text) return;
+  const visibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+  liveHypothesis = { start, end, previousEnd: liveHypothesis?.end ?? start, text, visibleText };
+  renderCompleted();
+}
+
+function commitFinal(rawText, start, end, latency) {
+  const text = String(rawText || "").trim();
+  if (!text) return;
+  const finalVisibleText = liveHypothesis ? commonPrefix(liveHypothesis.visibleText, text) : "";
+  liveHypothesis = null;
+  hypothesisAnimationId++;
+  segments.push({ id: nextSegmentId++, start, end, text, visibleText: finalVisibleText, latency });
+  segments.sort((a, b) => a.start - b.start);
+  renderCompleted();
+  sendSegment({ text, start, end });
+}
+
+async function startStream() {
+  const response = await fetch("/api/streams", { method: "POST", headers: { "X-Language": "Chinese" } });
+  const payload = await response.json();
+  if (!response.ok || !payload.stream_id) throw new Error(payload.detail || payload.error || "無法建立串流辨識");
+  return payload.stream_id;
+}
+
+async function streamAudio(streamId, action, pcm) {
+  const response = await fetch(`/api/streams/${streamId}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: pcm,
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || payload.error || "串流辨識失敗");
+  return payload;
+}
+
+async function abortStream(streamId) {
+  await fetch(`/api/streams/${streamId}/abort`, { method: "POST" });
+}
+
+async function pushStream(streamId, pcm, start, end, generation) {
+  pendingRequests++;
+  inferenceRange = { start, end };
+  try {
+    const payload = await streamAudio(streamId, "chunk", pcm);
+    if (generation !== sessionGeneration) return;
+    addInferenceEvent({ type: "ASR", context: `${(pcm.length / TARGET_SAMPLE_RATE).toFixed(1)} 秒 streaming`, detail: "stateful session", latency: payload.inference_seconds });
+    showProvisional(payload.text, start, end);
+  } catch (error) {
+    showToast(`串流逐字稿暫時無法產生：${error.message}`);
+    checkHealth();
+  } finally {
+    pendingRequests--;
+    inferenceRange = null;
+    syncUI();
+  }
+}
+
+async function finishStream(stream, pcm, start, end, generation) {
+  pendingRequests++;
+  inferenceRange = { start, end };
+  try {
+    const streamId = stream.id || await stream.startPromise;
+    const payload = await streamAudio(streamId, "finish", pcm);
+    if (generation !== sessionGeneration) return;
+    addInferenceEvent({ type: "ASR", context: `${(pcm.length / TARGET_SAMPLE_RATE).toFixed(1)} 秒 final`, detail: "stateful session", latency: payload.inference_seconds });
+    commitFinal(payload.text, start, end, payload.inference_seconds);
+  } catch (error) {
+    showToast(`串流逐字稿暫時無法完成：${error.message}`);
+    checkHealth();
+  } finally {
+    pendingRequests--;
+    inferenceRange = null;
     syncUI();
   }
 }
@@ -206,15 +356,18 @@ function formatTime(value) {
 function syncUI() {
   const current = activeMedia.currentTime || 0;
   const total = activeMedia.duration || 92.54;
-  const ratio = Math.min(1, current / total);
+  const ratio = mediaUnavailable ? 0 : Math.min(1, current / total);
   el.currentTime.textContent = formatTime(current);
-  el.duration.textContent = formatTime(total);
+  el.duration.textContent = mediaUnavailable ? "--:--" : formatTime(total);
+  el.playButton.disabled = mediaUnavailable;
+  el.timeline.disabled = mediaUnavailable;
+  el.restartButton.disabled = mediaUnavailable;
   el.timeline.value = ratio * 100;
   el.timeline.style.setProperty("--progress", `${ratio * 100}%`);
   el.lineCount.textContent = `${segments.length} 段`;
   el.progressBar.style.width = `${ratio * 100}%`;
   const latest = segments.at(-1);
-  el.progressText.textContent = pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
+  el.progressText.textContent = mediaUnavailable ? "尚未載入媒體" : pendingRequests ? "模型正在辨識" : latest ? `已辨識至 ${formatTime(latest.end)}` : activeMedia.paused ? "尚未開始" : "正在收音";
   const pending = meetingState ? meetingState.pending_segment_count : 0;
   el.summaryButton.disabled = rolloutPending || summaryStatus !== "ready" || !meetingId || !pending;
   el.summaryButton.textContent = rolloutPending ? "更新中…" : "立即整理";
@@ -225,33 +378,123 @@ function syncUI() {
 }
 
 function renderCompleted() {
-  if (!segments.length) {
-    el.transcriptStream.innerHTML = `<div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
+  const stream = el.transcriptStream;
+  const stickToBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
+  if (!segments.length && !liveHypothesis) {
+    renderedHypothesis = null;
+    const placeholder = !activeMedia.paused || pendingRequests ? "listening" : mediaUnavailable ? "no-media" : "idle";
+    if (stream.children.length !== 1 || stream.firstElementChild?.dataset.placeholder !== placeholder) {
+      stream.innerHTML = placeholder === "listening"
+        ? `<div class="list-placeholder" data-placeholder="listening"><i></i>正在收音，暫定文字很快會出現在這裡</div>`
+        : placeholder === "no-media"
+        ? `<div class="empty-state" data-placeholder="no-media"><div class="empty-glyph">Aa</div><strong>請先載入音訊或影片</strong><p>本專案未附帶示範音檔。請用右上角的「換一個檔案」上傳本機音訊／影片，或貼上 YouTube 連結。</p></div>`
+        : `<div class="empty-state" data-placeholder="idle"><div class="empty-glyph">Aa</div><strong>按下播放，開始即時逐字稿</strong><p>每段聲音會送到本機模型辨識，結果會持續出現在這裡。</p></div>`;
+    }
     return;
   }
-  el.transcriptStream.innerHTML = segments.map((segment, index) => `<article class="transcript-line${index === segments.length - 1 ? " latest" : ""}" data-start="${segment.start}"><button type="button" aria-label="跳到 ${formatTime(segment.start)}">${formatTime(segment.start)}</button><p>${escapeHTML(segment.text)}</p></article>`).join("");
-  el.transcriptStream.querySelectorAll("article").forEach(row => row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); }));
-  requestAnimationFrame(() => { el.transcriptStream.scrollTop = el.transcriptStream.scrollHeight; });
+  stream.querySelectorAll(":scope > .empty-state, :scope > .list-placeholder").forEach(node => node.remove());
+  const segmentIds = new Set(segments.map(segment => String(segment.id)));
+  stream.querySelectorAll(":scope > article[data-segment-id]").forEach(row => { if (!segmentIds.has(row.dataset.segmentId)) row.remove(); });
+  let provisionalRow = stream.querySelector(":scope > article.provisional");
+  segments.forEach((segment, index) => {
+    let row = stream.querySelector(`:scope > article[data-segment-id="${segment.id}"]`);
+    const isNewRow = !row;
+    if (isNewRow) {
+      row = document.createElement("article");
+      row.className = "transcript-line";
+      row.dataset.segmentId = String(segment.id);
+      row.dataset.start = String(segment.start);
+      const time = document.createElement("button"); time.type = "button";
+      const text = document.createElement("p");
+      row.append(time, text);
+      row.addEventListener("click", () => { capturer.discard(); activeMedia.currentTime = Number(row.dataset.start); syncUI(); });
+      stream.insertBefore(row, provisionalRow);
+    }
+    const time = row.querySelector("button");
+    time.textContent = formatTime(segment.start);
+    time.setAttribute("aria-label", `跳到 ${formatTime(segment.start)}`);
+    if (isNewRow) {
+      const text = row.querySelector("p");
+      const initialText = segment.visibleText ?? segment.text;
+      text.textContent = initialText;
+      if (initialText !== segment.text) animateFinalSegment(text, segment);
+    }
+    row.classList.toggle("latest", index === segments.length - 1 && !liveHypothesis);
+  });
+  if (liveHypothesis) {
+    if (!provisionalRow) {
+      provisionalRow = document.createElement("article");
+      provisionalRow.className = "transcript-line provisional";
+      provisionalRow.setAttribute("aria-live", "polite");
+      const time = document.createElement("span"); time.className = "provisional-time";
+      const text = document.createElement("p");
+      const label = document.createElement("small"); label.textContent = "暫定";
+      const hypothesisText = document.createElement("span"); hypothesisText.className = "provisional-text";
+      const caret = document.createElement("i"); caret.className = "caret";
+      text.append(label, hypothesisText, caret); provisionalRow.append(time, text); stream.append(provisionalRow);
+    }
+    provisionalRow.querySelector(".provisional-time").textContent = formatTime(liveHypothesis.start);
+    const target = provisionalRow.querySelector(".provisional-text");
+    if (renderedHypothesis !== liveHypothesis) {
+      target.textContent = liveHypothesis.visibleText;
+      renderedHypothesis = liveHypothesis;
+      animateHypothesis(liveHypothesis, target);
+    }
+  } else { provisionalRow?.remove(); renderedHypothesis = null; }
+  if (stickToBottom) stream.scrollTop = stream.scrollHeight;
 }
 
-function renderDraft(bufferedSeconds = 0, start = null, end = null) {
-  if (pendingRequests) {
-    const range = inferenceRange || { start, end };
-    el.liveDraft.hidden = false;
-    el.draftTime.textContent = formatTime(range.start ?? activeMedia.currentTime);
-    el.draftText.innerHTML = `正在辨識 ${formatTime(range.start)}–${formatTime(range.end)} 的聲音<i class="caret"></i>`;
-    return;
-  }
-  if (activeMedia.paused || !bufferedSeconds) { el.liveDraft.hidden = true; return; }
-  el.liveDraft.hidden = false;
-  el.draftTime.textContent = formatTime(Math.max(0, activeMedia.currentTime - bufferedSeconds));
-  el.draftText.innerHTML = `正在聆聽，已收集 ${bufferedSeconds.toFixed(1)} 秒<i class="caret"></i>`;
+function renderDraft() {}
+
+function animateHypothesis(hypothesis, target) {
+  const animationId = ++hypothesisAnimationId;
+  const characters = graphemes(hypothesis.text);
+  const initialCount = graphemes(hypothesis.visibleText).length;
+  const duration = Math.min(1000, Math.max(350, Math.max(.5, hypothesis.end - hypothesis.previousEnd) * 450));
+  const startedAt = performance.now();
+  const renderFrame = now => {
+    if (animationId !== hypothesisAnimationId || !target.isConnected) return;
+    const count = initialCount + Math.ceil((characters.length - initialCount) * Math.min(1, (now - startedAt) / duration));
+    hypothesis.visibleText = characters.slice(0, count).join(""); target.textContent = hypothesis.visibleText;
+    if (count < characters.length) requestAnimationFrame(renderFrame);
+  };
+  requestAnimationFrame(renderFrame);
+}
+
+function animateFinalSegment(target, segment) {
+  const animationId = ++finalAnimationId;
+  const characters = graphemes(segment.text);
+  const initialCount = graphemes(segment.visibleText || "").length;
+  const duration = Math.min(700, Math.max(240, (characters.length - initialCount) * 16));
+  const startedAt = performance.now();
+  const renderFrame = now => {
+    if (animationId !== finalAnimationId || !target.isConnected) return;
+    const count = initialCount + Math.ceil((characters.length - initialCount) * Math.min(1, (now - startedAt) / duration));
+    target.textContent = characters.slice(0, count).join("");
+    if (count < characters.length) requestAnimationFrame(renderFrame);
+  };
+  requestAnimationFrame(renderFrame);
+}
+
+function graphemes(text) {
+  return typeof Intl.Segmenter === "function" ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map(part => part.segment) : Array.from(text);
+}
+
+function commonPrefix(left, right) {
+  const leftCharacters = graphemes(left); const rightCharacters = graphemes(right); let index = 0;
+  while (index < leftCharacters.length && leftCharacters[index] === rightCharacters[index]) index++;
+  return leftCharacters.slice(0, index).join("");
 }
 
 async function togglePlay() {
+  if (mediaUnavailable) return showToast("請先上傳音訊／影片，或貼上 YouTube 連結");
   if (!activeMedia.paused) { activeMedia.pause(); return; }
   if (serverStatus !== "ready") {
-    showToast(serverStatus === "loading" ? "模型仍在載入，請稍候" : "請先啟動本機 inference service");
+    showToast(
+      serverStatus === "loading" ? "模型仍在載入，請稍候"
+      : serverStatus === "offline" ? "請先啟動本機 inference service"
+      : serverError ? `模型載入失敗：${briefError(serverError)}` : "模型載入失敗"
+    );
     await checkHealth();
     return;
   }
@@ -267,9 +510,11 @@ function updatePlaybackState() {
   el.playButton.setAttribute("aria-label", playing ? "暫停" : "播放");
   el.statusPill.classList.toggle("active", playing && serverStatus === "ready");
   if (serverStatus === "loading") el.statusText.textContent = "模型載入中";
-  else if (serverStatus === "error") el.statusText.textContent = "後端未連線";
+  else if (serverStatus === "offline") el.statusText.textContent = "後端未連線";
+  else if (serverStatus === "error") el.statusText.textContent = "模型載入失敗";
   else el.statusText.textContent = playing ? "辨識中" : activeMedia.currentTime ? "已暫停" : "可以開始";
   if (!playing) capturer.flush();
+  renderCompleted();
   syncUI();
 }
 
@@ -277,6 +522,7 @@ function bindMedia(media) {
   ["timeupdate", "loadedmetadata", "durationchange"].forEach(name => media.addEventListener(name, syncUI));
   ["play", "pause", "ended"].forEach(name => media.addEventListener(name, updatePlaybackState));
   media.addEventListener("seeking", () => capturer.discard());
+  media.addEventListener("error", () => { if (media !== activeMedia) return; mediaUnavailable = true; el.mediaTitle.textContent = "媒體載入失敗"; el.mediaMeta.textContent = "請改用其他檔案或 YouTube 連結"; showToast("這個媒體來源無法載入"); updatePlaybackState(); });
 }
 
 function resetTranscript() {
@@ -288,6 +534,8 @@ function resetTranscript() {
   rolloutPending = false;
   nextSegmentId = 1;
   inferenceEvents = [];
+  liveHypothesis = null;
+  hypothesisAnimationId++;
   clearTimeout(statePollTimer);
   statePollTimer = null;
   capturer.discard();
@@ -300,6 +548,7 @@ function resetTranscript() {
 
 function activateMediaSource(sourceUrl, { isAudio, label, meta, badgeText, toastMessage }) {
   activeMedia.pause();
+  mediaUnavailable = false;
   if (isAudio) {
     el.video.pause();
     el.video.classList.remove("visible");
@@ -585,22 +834,47 @@ function renderInferenceEvents() {
   el.contextList.innerHTML = events.map(event => `<article><span class="context-type ${event.type.toLowerCase()}">${event.type}</span><strong>${escapeHTML(event.context)}</strong><small>${escapeHTML(event.detail)}</small><time>${Number(event.latency || 0).toFixed(2)}s</time></article>`).join("");
 }
 
+// Backend errors are full tracebacks; the footer shows a readable head and the
+// console keeps the rest so a failed model load is diagnosable from the browser.
+function briefError(detail) {
+  const firstLine = String(detail).split("\n", 1)[0].trim();
+  return firstLine.length > 140 ? `${firstLine.slice(0, 139)}…` : firstLine;
+}
+
 async function checkHealth() {
   const previousSummaryStatus = summaryStatus;
+  const previousServerError = serverError;
+  const previousSummaryError = summaryError;
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const health = await response.json();
     serverStatus = health.status === "ready" ? "ready" : health.status === "loading" ? "loading" : "error";
-    summaryStatus = health.summary?.status === "ready" ? "ready" : health.summary?.status === "loading" ? "loading" : "error";
-    el.runtimeLabel.textContent = health.model || (serverStatus === "loading" ? "正在載入 Qwen3-ASR" : "Inference service 發生錯誤");
+    // The backend swallows load failures into health.error; without showing it the UI
+    // cannot tell "service not started" from "model failed to load".
+    serverError = serverStatus === "error" ? health.error || null : null;
+    if (serverError && serverError !== previousServerError) console.error("inference service error:", serverError);
+    streamingEnabled = serverStatus === "ready" && health.streaming === true;
+    const summaryHealth = health.summary?.status;
+    summaryStatus = summaryHealth === "ready" ? "ready"
+      : summaryHealth === "loading" ? "loading"
+      : summaryHealth === "disabled" ? "disabled" : "error";
+    summaryError = summaryStatus === "error" ? health.summary?.error || null : null;
+    if (summaryError && summaryError !== previousSummaryError) console.error("summary model error:", summaryError);
+    el.runtimeLabel.textContent = health.model
+      || (serverStatus === "loading" ? "正在載入 Qwen3-ASR"
+      : serverError ? `Inference service 錯誤：${briefError(serverError)}` : "Inference service 發生錯誤");
     const budget = health.summary?.max_context_tokens;
     el.summaryRuntime.textContent = health.summary?.model
       ? `${health.summary.model} · 每輪 ${budget} tokens 預算`
-      : summaryStatus === "loading" ? "摘要模型載入中" : "摘要模型無法使用";
+      : summaryStatus === "loading" ? "摘要模型載入中"
+      : summaryStatus === "disabled" ? "摘要功能已停用"
+      : summaryError ? `摘要模型錯誤：${briefError(summaryError)}` : "摘要模型無法使用";
   } catch (_) {
-    serverStatus = "error";
+    serverStatus = "offline";
+    serverError = null;
     summaryStatus = "error";
+    summaryError = null;
     el.runtimeLabel.textContent = "未連接本機 inference service";
     el.summaryRuntime.textContent = "未連接本機 inference service";
   }

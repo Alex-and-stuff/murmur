@@ -57,6 +57,13 @@ class ServerSmokeTest(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn(b"Murmur", response.read())
 
+    def test_summary_can_be_disabled(self):
+        from backend.llm import LLMState
+
+        summary_state = LLMState()
+        summary_state.load("off", "unused")
+        self.assertEqual(summary_state.snapshot()["status"], "disabled")
+
     def test_float32_chunk_is_transcribed(self):
         pcm = array("f", [0.0]) * SAMPLE_RATE
         request = urllib.request.Request(
@@ -87,6 +94,66 @@ class ServerSmokeTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=2)
         self.assertEqual(caught.exception.code, 400)
+
+
+class StreamingServerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.state = BackendState()
+        cls.state.load("fixture-streaming", "unused")
+        cls.llm_state = LLMState("summary")
+        cls.llm_state.adopt(ScriptedChatLLM())
+        cls.service = MeetingService(llm_state=cls.llm_state, scheduler_interval=3_600)
+        cls.server = create_server("127.0.0.1", 0, cls.state, meeting_service=cls.service)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.service.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+
+    def test_streaming_session_accumulates_incremental_audio_then_finishes(self):
+        start = urllib.request.Request(
+            self.base_url + "/api/streams",
+            data=b"",
+            method="POST",
+            headers={"X-Language": "Chinese"},
+        )
+        with urllib.request.urlopen(start, timeout=2) as response:
+            stream_id = json.load(response)["stream_id"]
+
+        pcm = array("f", [0.0]) * SAMPLE_RATE
+        chunk = urllib.request.Request(
+            f"{self.base_url}/api/streams/{stream_id}/chunk",
+            data=pcm.tobytes(),
+            method="POST",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        with urllib.request.urlopen(chunk, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["text"], "測試串流 1.0 秒")
+
+        finish = urllib.request.Request(
+            f"{self.base_url}/api/streams/{stream_id}/finish",
+            data=b"",
+            method="POST",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        with urllib.request.urlopen(finish, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["text"], "測試串流 1.0 秒")
+
+        with urllib.request.urlopen(start, timeout=2) as response:
+            abandoned_id = json.load(response)["stream_id"]
+        abort = urllib.request.Request(
+            f"{self.base_url}/api/streams/{abandoned_id}/abort", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(abort, timeout=2) as response:
+            self.assertTrue(json.load(response)["aborted"])
 
 
 class MeetingApiTest(unittest.TestCase):

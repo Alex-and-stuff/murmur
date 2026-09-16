@@ -26,6 +26,7 @@ from backend.media import MediaFetchError, MediaFetcher, YtDlpFetcher, is_allowe
 from backend.meeting.service import MeetingService
 
 MEETING_PATH = re.compile(r"^/api/meetings/([A-Za-z0-9_-]{1,64})(/[a-z-]+)?$")
+STREAM_PATH = re.compile(r"^/api/streams/([a-f0-9]{32})/(chunk|finish|abort)$")
 
 
 class MurmurHandler(SimpleHTTPRequestHandler):
@@ -117,6 +118,13 @@ class MurmurHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/streams":
+            self._handle_stream_start()
+            return
+        stream_match = STREAM_PATH.match(path)
+        if stream_match:
+            self._handle_stream_audio(stream_match.group(1), stream_match.group(2))
+            return
         if path == "/api/fetch-media":
             self._handle_fetch_media()
             return
@@ -131,6 +139,75 @@ class MurmurHandler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         self._handle_transcribe()
+
+    def _streaming_backend(self):
+        backend = self.state.backend
+        if self.state.snapshot()["status"] != "ready" or not getattr(backend, "streaming", False):
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "streaming_not_ready"})
+            return None
+        return backend
+
+    def _read_pcm(self, *, allow_empty: bool = False) -> np.ndarray | None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0]
+        if content_type != "application/octet-stream":
+            self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "expected_float32_pcm"})
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        minimum = 0 if allow_empty else SAMPLE_RATE * 4
+        if length < minimum or length > MAX_AUDIO_BYTES or length % 4:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_audio_length"})
+            return None
+        samples = np.frombuffer(self.rfile.read(length), dtype="<f4").copy()
+        if not np.isfinite(samples).all():
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_audio", "detail": "audio contains non-finite samples"})
+            return None
+        return np.clip(samples, -1.0, 1.0)
+
+    def _stream_response(self, text: str, language: str, started_at: float) -> None:
+        self._json(
+            HTTPStatus.OK,
+            {
+                "text": text,
+                "language": language,
+                "inference_seconds": round(time.monotonic() - started_at, 3),
+            },
+        )
+
+    def _handle_stream_start(self) -> None:
+        backend = self._streaming_backend()
+        if backend is None:
+            return
+        language = self.headers.get("X-Language", "Chinese")[:32]
+        try:
+            self._json(HTTPStatus.OK, {"stream_id": backend.start_stream(language)})
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "stream_start_failed", "detail": f"{type(exc).__name__}: {exc}"})
+
+    def _handle_stream_audio(self, stream_id: str, action: str) -> None:
+        backend = self._streaming_backend()
+        if backend is None:
+            return
+        if action == "abort":
+            backend.abort_stream(stream_id)
+            self._json(HTTPStatus.OK, {"aborted": True})
+            return
+        samples = self._read_pcm(allow_empty=action == "finish")
+        if samples is None:
+            return
+        began = time.monotonic()
+        try:
+            if action == "chunk":
+                text, language = backend.push_stream(stream_id, samples)
+            else:
+                text, language = backend.finish_stream(stream_id, samples)
+            self._stream_response(text, language, began)
+        except KeyError:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown_stream"})
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "stream_inference_failed", "detail": f"{type(exc).__name__}: {exc}"})
 
     def _handle_meeting_post(self, meeting_id: str, action: str) -> None:
         if not self.meetings.store.meeting_exists(meeting_id):
@@ -183,27 +260,13 @@ class MurmurHandler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "model_not_ready", **snapshot})
             return
 
-        content_type = self.headers.get("Content-Type", "").split(";", 1)[0]
-        if content_type != "application/octet-stream":
-            self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "expected_float32_pcm"})
-            return
-
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        if length < SAMPLE_RATE * 4 or length > MAX_AUDIO_BYTES or length % 4:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_audio_length"})
-            return
-
         try:
             start = max(0.0, float(self.headers.get("X-Audio-Start", "0")))
             end = max(start, float(self.headers.get("X-Audio-End", "0")))
             language = self.headers.get("X-Language", "Chinese")[:32]
-            samples = np.frombuffer(self.rfile.read(length), dtype="<f4").copy()
-            if not np.isfinite(samples).all():
-                raise ValueError("audio contains non-finite samples")
-            samples = np.clip(samples, -1.0, 1.0)
+            samples = self._read_pcm()
+            if samples is None:
+                return
             began = time.monotonic()
             text, detected_language = self.state.backend.transcribe(samples, language)
             self._json(

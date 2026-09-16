@@ -6,6 +6,9 @@ local inference service, and appends each Qwen3-ASR result to the transcript pan
 source media itself is never uploaded as a file. Local MP3, other browser-supported audio,
 and browser-supported video files share the same flow.
 
+No demo clip ships with this repository, so the page starts with an empty player: upload
+your own audio/video or paste a YouTube link to begin.
+
 Transcript segments then feed a **bounded meeting state** instead of an ever-growing
 rolling summary. Raw ASR is stored verbatim and queued; once the queue crosses a token or
 time threshold, one rollout sends a fixed-size prompt to the local 8B model:
@@ -123,3 +126,56 @@ The deployed static prototype remains useful as a UI preview, but realtime infer
 must currently be run through the local server because the POC models require Apple
 Metal. This stage intentionally targets MLX; an RTX backend abstraction is deferred until
 the summary workflow and output quality are validated.
+
+## Run ASR only on Windows with NVIDIA CUDA
+
+The Windows backend uses the official `qwen-asr` Transformers runtime. It deliberately
+disables meeting summaries, so no Apple-only MLX model is loaded. An NVIDIA GPU with CUDA
+support is required.
+
+Create a clean virtual environment, then install CUDA-enabled PyTorch before the ASR
+package. This example uses CUDA 12.6 wheels:
+
+```powershell
+python -m venv .venv-qwen-asr
+.\.venv-qwen-asr\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-qwen-asr\Scripts\python.exe -m pip install torch==2.7.1+cu126 --index-url https://download.pytorch.org/whl/cu126
+.\.venv-qwen-asr\Scripts\python.exe -m pip install qwen-asr numpy
+```
+
+Start with the smaller Qwen model, which downloads automatically on its first run:
+
+```powershell
+.\.venv-qwen-asr\Scripts\python.exe backend\server.py --backend transformers --model Qwen/Qwen3-ASR-0.6B --summary-backend off
+```
+
+Then open <http://127.0.0.1:8787>. The service health endpoint should show
+`Qwen/Qwen3-ASR-0.6B · Transformers CUDA`. On the tested RTX 3060 Ti (8 GB), this model
+used about 3.2 GB VRAM and transcribed five seconds of Chinese audio in 2.31 seconds.
+
+## Run stateful streaming ASR through WSL2
+
+Qwen's official streaming mode uses vLLM, which runs on Linux rather than native Windows.
+On an NVIDIA Windows machine, use WSL2 and keep the Windows Transformers service stopped so
+vLLM has exclusive access to the GPU.
+
+```bash
+# Run inside Ubuntu (WSL), once.
+python3 -m venv ~/.venvs/murmur-qwen-vllm
+~/.venvs/murmur-qwen-vllm/bin/pip install --upgrade pip
+~/.venvs/murmur-qwen-vllm/bin/pip install 'qwen-asr[vllm]' yt-dlp
+```
+
+Start Murmur from the WSL copy of the repository:
+
+```bash
+cd /mnt/<drive>/path/to/murmur   # the WSL view of your Windows checkout
+~/.venvs/murmur-qwen-vllm/bin/python backend/server.py \
+  --port 8788 --backend vllm --model Qwen/Qwen3-ASR-0.6B --summary-backend off \
+  --vllm-gpu-memory-utilization 0.75 --vllm-max-model-len 4096
+```
+
+The browser continues to use <http://127.0.0.1:8788>. When the health response exposes
+`streaming: true`, it sends new one-second PCM audio to one stateful Qwen session. The model
+manages its own rolling text and token rollback; at a natural pause the browser calls `finish`
+and commits the final segment.

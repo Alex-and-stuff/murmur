@@ -37,18 +37,18 @@
           <video id="video" playsinline></video>
           <div class="video-badge" id="videoBadge"><span></span> 測試素材</div>
         </div>
-        <audio id="demoAudio" preload="metadata" src="assets/kelly_shorts.mp3"></audio>
+        <audio id="demoAudio" preload="metadata"></audio>
 
         <div class="player-controls">
           <button class="play-button" id="playButton" type="button" aria-label="播放"><span id="playIcon">▶</span></button>
           <span class="time" id="currentTime">00:00</span>
           <input class="timeline" id="timeline" type="range" min="0" max="100" value="0" step="0.1" aria-label="播放進度" />
-          <span class="time muted" id="duration">01:32</span>
+          <span class="time muted" id="duration">--:--</span>
           <button class="sound-button" id="soundButton" type="button" aria-label="靜音">⌁</button>
         </div>
 
         <div class="media-meta">
-          <div><span class="file-icon">▶</span><div><strong id="mediaTitle">Apple 發表會重點.mp4</strong><small id="mediaMeta">示範素材 · 繁體中文</small></div></div>
+          <div><span class="file-icon">▶</span><div><strong id="mediaTitle">尚未載入媒體</strong><small id="mediaMeta">請上傳本機檔案或貼上 YouTube 連結</small></div></div>
           <button id="restartButton" type="button">↺ 重新測試</button>
         </div>
       </div>
@@ -62,9 +62,6 @@
         <div class="progress-track"><i id="progressBar"></i></div>
         <div class="transcript-stream" id="transcriptStream" aria-live="polite">
           <div class="empty-state"><div class="empty-glyph">Aa</div><strong>按下播放，看看逐字稿如何產生</strong><p>完成的句子會保留下來，目前辨識中的內容則會即時更新。</p></div>
-        </div>
-        <div class="live-draft" id="liveDraft" hidden>
-          <div class="draft-meta"><span><i></i> 正在辨識</span><time id="draftTime">00:00</time></div><p id="draftText"></p>
         </div>
         <footer class="panel-footer"><span><i></i> <b id="runtimeLabel">正在連接 inference service</b></span><button id="copyButton" type="button">複製逐字稿</button></footer>
       </aside>

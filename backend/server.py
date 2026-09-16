@@ -25,12 +25,12 @@ def main() -> None:
     parser.add_argument("--port", default=8787, type=int)
     parser.add_argument(
         "--backend",
-        choices=("mlx", "fixture"),
+        choices=("mlx", "transformers", "vllm", "fixture", "fixture-streaming"),
         default=os.environ.get("MURMUR_ASR_BACKEND", "mlx"),
     )
     parser.add_argument(
         "--summary-backend",
-        choices=("mlx", "fixture"),
+        choices=("mlx", "fixture", "off"),
         default=os.environ.get("MURMUR_SUMMARY_BACKEND", "mlx"),
     )
     parser.add_argument(
@@ -46,6 +46,16 @@ def main() -> None:
         "--model",
         default=os.environ.get("MURMUR_ASR_MODEL", DEFAULT_ASR_MODEL),
     )
+    parser.add_argument(
+        "--vllm-gpu-memory-utilization",
+        default=float(os.environ.get("MURMUR_VLLM_GPU_MEMORY_UTILIZATION", "0.75")),
+        type=float,
+    )
+    parser.add_argument(
+        "--vllm-max-model-len",
+        default=int(os.environ.get("MURMUR_VLLM_MAX_MODEL_LEN", "4096")),
+        type=int,
+    )
     args = parser.parse_args()
 
     state = BackendState()
@@ -56,7 +66,12 @@ def main() -> None:
         # Both MLX runtimes lazily import transformers. Initializing them in
         # parallel can expose a partially initialized lazy module, so keep
         # model startup off the HTTP thread but serialize the two loads.
-        state.load(args.backend, args.model)
+        state.load(
+            args.backend,
+            args.model,
+            vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+            vllm_max_model_len=args.vllm_max_model_len,
+        )
         summary_state.load(args.summary_backend, args.summary_model)
         if summary_state.llm is not None:
             # Hands the engine the real tokenizer so budgets match inference.
