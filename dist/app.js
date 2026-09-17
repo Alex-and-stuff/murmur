@@ -352,16 +352,18 @@ class FastTranscriber {
       if (streamingEnabled) await this.runStreamingSegment(run, audio, start, end);
       else await this.runBatchSegment(run, audio, start, end);
       run.completedSeconds = end;
-      activeMedia.currentTime = end;
       syncUI();
     }
   }
 
   async runStreamingSegment(run, audio, start, end) {
-    const streamId = await startStream(run.controller.signal);
+    // Do not abort the session-creation request. If Stop lands while the server is
+    // creating a session, we still need its id so the finally block can release it.
+    const streamId = await startStream();
     run.streamId = streamId;
     let finished = false;
     try {
+      this.assertActive(run);
       let cursor = start;
       while (cursor + MIN_CHUNK_SECONDS <= end + 0.0001) {
         this.assertActive(run);
@@ -406,7 +408,6 @@ class FastTranscriber {
     addInferenceEvent({ type: "ASR", context: `${(end - start).toFixed(1)} 秒 fast stream`, detail: "stateful session", latency: payload.inference_seconds });
     showProvisional(payload.text, start, end);
     run.completedSeconds = end;
-    activeMedia.currentTime = end;
     syncUI();
   }
 
@@ -588,7 +589,7 @@ function formatTime(value) {
 
 function syncUI() {
   const live = captureMode !== "media";
-  const current = captureClock();
+  const current = fastTranscription ? fastTranscription.completedSeconds : captureClock();
   const total = activeMedia.duration || 92.54;
   const fastRatio = fastTranscription?.totalSeconds ? fastTranscription.completedSeconds / fastTranscription.totalSeconds : 0;
   const ratio = fastTranscription ? fastRatio : live || mediaUnavailable ? 0 : Math.min(1, current / total);
